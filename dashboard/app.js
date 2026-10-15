@@ -5,11 +5,28 @@ const ui = {
   toastTimer: null,
   retentionSnapshotId: null,
   engagementVideoId: null,
-  engagementDetail: null
+  engagementDetail: null,
+  configuration: null,
+  voiceboxCatalog: null,
+  voiceboxPreviewUrl: null,
+  lmStudioModels: [],
+  lmStudioDownloadJobs: readLMStudioDownloadJobs(),
+  lmStudioRefreshing: false,
+  lmStudioPollTimer: null
 };
 
 const $ = selector => document.querySelector(selector);
 const $$ = selector => Array.from(document.querySelectorAll(selector));
+
+function readLMStudioDownloadJobs() {
+  try {
+    const jobs = JSON.parse(localStorage.getItem('lmstudio_download_jobs') || '[]');
+    return Array.isArray(jobs) ? jobs.filter(job => job && typeof job.job_id === 'string') : [];
+  } catch (_error) {
+    localStorage.removeItem('lmstudio_download_jobs');
+    return [];
+  }
+}
 
 function escapeHTML(value) {
   return String(value ?? '')
@@ -814,7 +831,12 @@ function populateSettings(profile = {}, settings = {}, providers = []) {
     videoProvider: settings.video_provider || 'slideshow',
     videoGenerationMode: settings.video_generation_mode || 'hybrid',
     videoClipDuration: settings.video_clip_duration || '8',
-    videoMaxGeneratedSeconds: settings.video_max_generated_seconds || '60'
+    videoMaxGeneratedSeconds: settings.video_max_generated_seconds || '60',
+    comfyuiBaseURL: settings.comfyui_base_url || 'http://127.0.0.1:8188',
+    comfyuiFrameRate: settings.comfyui_frame_rate || '24',
+    comfyuiWorkflow: settings.comfyui_workflow
+      ? (typeof settings.comfyui_workflow === 'string' ? settings.comfyui_workflow : JSON.stringify(settings.comfyui_workflow, null, 2))
+      : ''
   };
   for (const [name, value] of Object.entries(videoMapping)) {
     if (form.elements[name] && document.activeElement !== form.elements[name]) form.elements[name].value = value;
@@ -823,6 +845,9 @@ function populateSettings(profile = {}, settings = {}, providers = []) {
   $('#video-provider-status').textContent = videoMapping.videoProvider === 'auto'
     ? `${providers.filter(provider => provider.available && provider.id !== 'slideshow').length} paid provider(s) available; local slideshow remains the final fallback.`
     : videoMapping.videoProvider === 'slideshow' ? 'Local FFmpeg slideshow is selected; no external video credentials are required.'
+      : videoMapping.videoProvider === 'comfyui' ? selected?.available
+        ? 'ComfyUI API workflow is configured. Test the local connection before generating.'
+        : 'Select ComfyUI, paste an API-format workflow, and save to enable local video generation.'
       : selected?.available ? `${label(selected.id)} is configured (${selected.model}).` : `${label(videoMapping.videoProvider)} credentials are not configured.`;
 }
 
@@ -845,16 +870,24 @@ function populateConfiguration(configuration = {}) {
     voiceboxModelSize: voicebox.modelSize,
     voiceboxLanguage: voicebox.language || 'en',
     voiceboxInstruct: voicebox.instruct,
+    voiceboxMaxChunkChars: voicebox.maxChunkChars || 800,
+    voiceboxCrossfadeMs: voicebox.crossfadeMs ?? 50,
     elevenLabsVoiceId: tts.elevenLabs?.voiceId
   })) {
-    if (form.elements[name] && document.activeElement !== form.elements[name]) form.elements[name].value = value || '';
+    if (form.elements[name] && document.activeElement !== form.elements[name]) form.elements[name].value = value ?? '';
+  }
+  if (document.activeElement !== form.elements.voiceboxNormalize) {
+    form.elements.voiceboxNormalize.checked = voicebox.normalize !== false;
   }
   const profileSelect = $('#voicebox-profile');
-  if (voicebox.profileId && !Array.from(profileSelect.options).some(option => option.value === voicebox.profileId)) {
-    profileSelect.innerHTML = `<option value="${escapeHTML(voicebox.profileId)}">${escapeHTML(voicebox.profileId)} · saved profile</option>`;
+  if (voicebox.profileId && document.activeElement !== profileSelect) {
+    profileSelect.dataset.savedProfile = voicebox.profileId;
   }
-  if (voicebox.profileId && document.activeElement !== profileSelect) profileSelect.value = voicebox.profileId;
+  $('#voicebox-engine').dataset.savedEngine = voicebox.engine || '';
+  $('#voicebox-model-size').dataset.savedModelSize = voicebox.modelSize || '';
+  $('#voicebox-language').dataset.savedLanguage = voicebox.language || 'en';
   updateTTSFields();
+  populateWhisperModels();
 
   const configured = tts.configured || {};
   const statuses = [
@@ -885,7 +918,8 @@ function populateConfiguration(configuration = {}) {
 
 function updateTextProviderFields(providerConfiguration = ui.configuration?.textProvider || {}) {
   const selected = $('#text-provider-select').value;
-  const local = selected === 'local';
+  const local = ['local', 'lmstudio'].includes(selected);
+  const lmStudio = selected === 'lmstudio';
   const selectedProvider = providerConfiguration.providers?.find(provider => provider.id === selected);
   const modelSelect = $('#text-model-select');
   const modelSelectWrap = $('#text-model-select-wrap');
@@ -894,9 +928,24 @@ function updateTextProviderFields(providerConfiguration = ui.configuration?.text
   customWrap.classList.toggle('hidden', !local);
   $('#local-model-url-wrap').classList.toggle('hidden', !local);
   $('#test-local-model').classList.toggle('hidden', !local);
+  $('#find-lmstudio-models').classList.toggle('hidden', !lmStudio);
+  $('#lmstudio-management').classList.toggle('hidden', !lmStudio);
   if (local) {
-    $('#local-model-url').value = providerConfiguration.localBaseUrl || $('#local-model-url').value || 'http://127.0.0.1:8080/v1';
-    $('#text-model-custom').value = providerConfiguration.localModel || $('#text-model-custom').value || '';
+    const urlInput = $('#local-model-url');
+    if (urlInput.dataset.provider !== selected) {
+      const sameSavedProvider = providerConfiguration.localProvider === selected;
+      urlInput.value = sameSavedProvider && providerConfiguration.localBaseUrl
+        ? providerConfiguration.localBaseUrl
+        : lmStudio ? 'http://127.0.0.1:1234/v1' : 'http://127.0.0.1:8080/v1';
+      $('#text-model-custom').value = sameSavedProvider ? providerConfiguration.localModel || '' : '';
+      $('#lmstudio-model-suggestions').innerHTML = '';
+      urlInput.dataset.provider = selected;
+    }
+    urlInput.placeholder = lmStudio ? 'http://127.0.0.1:1234/v1' : 'http://127.0.0.1:8080/v1';
+    $('#local-model-url-hint').textContent = lmStudio
+      ? 'Start the LM Studio local server with its OpenAI-compatible API. Default port: 1234. Localhost only.'
+      : 'Use an OpenAI-compatible llama.cpp server loading your .gguf model. Localhost only.';
+    $('#text-model-custom-wrap > span').textContent = lmStudio ? 'Loaded model ID in LM Studio' : 'Model ID in your local server';
     modelSelect.innerHTML = '';
   } else if (selectedProvider) {
     const models = selectedProvider.models || [];
@@ -915,10 +964,287 @@ function updateTTSFields() {
   $('#tts-api-key-wrap').classList.toggle('hidden', !['openai', 'gemini'].includes(selected));
 }
 
+function populateVoiceboxCatalog(catalog = ui.voiceboxCatalog) {
+  if (!catalog) return;
+  const profiles = catalog.profiles || [];
+  const profileSelect = $('#voicebox-profile');
+  const savedProfile = profileSelect.dataset.savedProfile || profileSelect.value;
+  profileSelect.innerHTML = '<option value="">Select a Voicebox profile</option>' + profiles.map(profile => {
+    const details = [
+      profile.voiceType,
+      profile.language,
+      profile.presetEngine ? `${label(profile.presetEngine)} preset` : '',
+      profile.sampleCount ? `${profile.sampleCount} samples` : ''
+    ].filter(Boolean).join(' · ');
+    return `<option value="${escapeHTML(profile.id)}">${escapeHTML(profile.name)}${details ? ` · ${escapeHTML(details)}` : ''}</option>`;
+  }).join('');
+  if (profiles.some(profile => profile.id === savedProfile)) profileSelect.value = savedProfile;
+  const engineSelect = $('#voicebox-engine');
+  const savedEngine = engineSelect.dataset.savedEngine || engineSelect.value;
+  engineSelect.innerHTML = '<option value="">Use profile default</option>' + (catalog.engines || []).map(engine =>
+    `<option value="${escapeHTML(engine.id)}">${escapeHTML(engine.name)}${engine.nonCommercial ? ' · non-commercial license' : ''}</option>`
+  ).join('');
+  if ((catalog.engines || []).some(engine => engine.id === savedEngine)) engineSelect.value = savedEngine;
+  updateVoiceboxEngineFields();
+  renderVoiceboxModels(catalog);
+  populateWhisperModels(catalog);
+  const gpu = catalog.health || {};
+  const vram = Number.isFinite(gpu.vramUsedMb) ? ` · ${Math.round(gpu.vramUsedMb / 1024)} GB VRAM in use` : '';
+  $('#voicebox-hardware-status').textContent = `${gpu.gpuType || 'Voicebox connected'}${vram}${gpu.backendType ? ` · ${gpu.backendType}` : ''}`;
+}
+
+function updateVoiceboxEngineFields() {
+  const catalog = ui.voiceboxCatalog;
+  const engines = catalog?.engines || [];
+  const engineSelect = $('#voicebox-engine');
+  const selectedProfile = (catalog?.profiles || []).find(profile => profile.id === $('#voicebox-profile').value);
+  const profileDefaultEngine = selectedProfile?.defaultEngine || selectedProfile?.presetEngine ||
+    (selectedProfile?.voiceType === 'cloned' ? 'qwen' : null);
+  let selectedEngine = engines.find(engine => engine.id === engineSelect.value || engine.id === profileDefaultEngine);
+  if (!engineSelect.value && profileDefaultEngine && selectedEngine) engineSelect.value = profileDefaultEngine;
+  const compatible = selectedProfile
+    ? engines.filter(engine =>
+      engine.profileType === selectedProfile.voiceType &&
+      (engine.profileType !== 'preset' || engine.id === selectedProfile.presetEngine)
+    )
+    : engines;
+  for (const option of engineSelect.options) {
+    if (option.value) option.disabled = !compatible.some(engine => engine.id === option.value);
+  }
+  if (engineSelect.value && !compatible.some(engine => engine.id === engineSelect.value)) {
+    engineSelect.value = selectedProfile?.defaultEngine || selectedProfile?.presetEngine || '';
+    selectedEngine = engines.find(engine => engine.id === engineSelect.value);
+  }
+  const models = selectedEngine?.models || [];
+  const sizeWrap = $('#voicebox-model-size-wrap');
+  const sizeSelect = $('#voicebox-model-size');
+  sizeWrap.classList.toggle('hidden', !selectedEngine?.modelSizes?.length);
+  sizeSelect.innerHTML = (selectedEngine?.modelSizes || []).map((size, index) => {
+    const model = models[index];
+    const state = model?.downloaded ? ' · downloaded' : model?.downloading ? ' · downloading' : ' · not downloaded';
+    return `<option value="${escapeHTML(size)}">${escapeHTML(size)}${state}</option>`;
+  }).join('');
+  const savedSize = sizeSelect.dataset.savedModelSize;
+  if ((selectedEngine?.modelSizes || []).includes(savedSize)) sizeSelect.value = savedSize;
+  else if (sizeSelect.options.length) sizeSelect.value = sizeSelect.options[0].value;
+
+  const languageSelect = $('#voicebox-language');
+  const previousLanguage = languageSelect.value || languageSelect.dataset.savedLanguage;
+  const languageEntries = (catalog?.languages || []).filter(([code]) => selectedEngine?.languages?.includes(code));
+  languageSelect.innerHTML = languageEntries.map(([code, name]) =>
+    `<option value="${escapeHTML(code)}">${escapeHTML(name)}</option>`
+  ).join('');
+  if (languageEntries.some(([code]) => code === previousLanguage)) languageSelect.value = previousLanguage;
+  else if (languageEntries.some(([code]) => code === selectedProfile?.language)) languageSelect.value = selectedProfile.language;
+  $('#voicebox-engine-hint').textContent = selectedEngine
+    ? `${selectedEngine.profileType} profile · ${selectedEngine.languages.length} supported language(s)${selectedEngine.nonCommercial ? ' · non-commercial use only' : ''}.`
+    : selectedProfile ? `Profile default: ${label(profileDefaultEngine || 'not configured')}.` : 'Select a voice profile to filter compatible engines.';
+  updatePresetVoiceOptions();
+}
+
+function updatePresetVoiceOptions() {
+  const engine = $('#voicebox-preset-engine').value;
+  const select = $('#voicebox-preset-voice');
+  const previous = select.value;
+  const voices = ui.voiceboxCatalog?.presets?.[engine] || [];
+  select.innerHTML = voices.length
+    ? voices.map(voice => `<option value="${escapeHTML(voice.voice_id)}">${escapeHTML(voice.name)}${voice.language ? ` · ${escapeHTML(voice.language)}` : ''}</option>`).join('')
+    : '<option value="">No preset voices found</option>';
+  if (voices.some(voice => voice.voice_id === previous)) select.value = previous;
+}
+
+function renderVoiceboxModels(catalog) {
+  const render = model => {
+    const status = model.downloading ? 'Downloading'
+      : model.loaded ? 'Loaded in memory'
+        : model.downloaded ? 'Downloaded'
+          : 'Not downloaded';
+    const action = model.downloading ? 'download' : model.loaded ? 'unload' : model.downloaded ? 'load' : 'download';
+    const buttonLabel = model.downloading ? 'Downloading…' : model.loaded ? 'Unload' : model.downloaded ? 'Load' : 'Download';
+    const disabled = model.downloading;
+    const size = model.sizeMb ? `${(model.sizeMb / 1024).toFixed(1)} GB on disk` : '';
+    return `<article class="voicebox-model-card">
+      <div><strong>${escapeHTML(model.name)}</strong><small>${escapeHTML(size)}${size ? ' · ' : ''}${escapeHTML(status)}</small><span class="status ${model.loaded ? 'passed' : model.downloading ? 'warning' : ''}">${escapeHTML(status)}</span></div>
+      <button type="button" class="button secondary small" data-voicebox-model-action="${escapeHTML(action)}" data-model-name="${escapeHTML(model.id)}" ${disabled ? 'disabled' : ''}>${escapeHTML(buttonLabel)}</button>
+    </article>`;
+  };
+  const ttsModels = (catalog.engines || []).flatMap(engine => engine.models);
+  const whisperModels = catalog.whisperModels || [];
+  $('#voicebox-model-list').innerHTML = [...ttsModels, ...whisperModels].map(render).join('')
+    || empty('No Voicebox models were reported.');
+}
+
+function populateWhisperModels(catalog = ui.voiceboxCatalog) {
+  if (!catalog) return;
+  const select = $('#voicebox-whisper-model');
+  const options = catalog.whisperModels || [];
+  const preferred = options.find(model => model.value === 'turbo' && model.downloaded) ||
+    options.find(model => model.value === 'large' && model.downloaded) ||
+    options.find(model => model.value === 'turbo') || options[0];
+  select.innerHTML = options.map(model => {
+    const state = model.downloaded ? ' · downloaded' : model.downloading ? ' · downloading' : ' · download first';
+    return `<option value="${escapeHTML(model.value)}" ${model.downloaded ? '' : 'disabled'}>${escapeHTML(model.name)}${state}</option>`;
+  }).join('');
+  if (preferred) select.value = preferred.value;
+  const language = $('#voicebox-whisper-language');
+  const current = language.value;
+  language.innerHTML = '<option value="">Detect automatically</option>' + (catalog.languages || []).map(([code, name]) =>
+    `<option value="${escapeHTML(code)}">${escapeHTML(name)}</option>`
+  ).join('');
+  if (current) language.value = current;
+}
+
 async function loadConfiguration() {
   const response = await api('/api/configuration');
   ui.configuration = response.result;
   populateConfiguration(ui.configuration);
+  if (ui.configuration.textProvider?.selected === 'lmstudio') {
+    await refreshLMStudioModels({ silent: true });
+  } else {
+    ui.lmStudioModels = [];
+    renderLMStudioModels();
+  }
+  const baseUrl = $('#integrations-form').elements.voiceboxBaseURL.value || ui.configuration.tts?.voicebox?.baseUrl;
+  await loadVoiceboxCatalog(baseUrl, { silent: true });
+}
+
+function lmStudioRequestSettings() {
+  return {
+    baseURL: $('#local-model-url').value,
+    apiKey: $('#integrations-form').elements.textApiKey.value
+  };
+}
+
+function formatModelSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return 'size unavailable';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value.toFixed(unit > 0 ? 1 : 0)} ${units[unit]}`;
+}
+
+function renderLMStudioModels() {
+  $('#lmstudio-model-list').innerHTML = ui.lmStudioModels.length
+    ? ui.lmStudioModels.map(model => {
+      const instances = model.loadedInstances || [];
+      const selected = $('#text-model-custom').value === model.key;
+      const details = [
+        model.paramsString,
+        model.quantization,
+        formatModelSize(model.sizeBytes),
+        model.format
+      ].filter(Boolean).join(' · ');
+      return `<article class="lmstudio-model-card">
+        <div class="lmstudio-model-info">
+          <strong>${escapeHTML(model.displayName || model.key)}</strong>
+          <span class="meta-line">${escapeHTML(model.key)} · ${escapeHTML(model.type || 'model')}</span>
+          <span class="meta-line">${escapeHTML(details || 'Model details unavailable')}</span>
+          ${instances.map(instance => `<span class="integration-status-item ready">Loaded · ${escapeHTML(instance.id)}${instance.contextLength ? ` · ${escapeHTML(String(instance.contextLength))} tokens` : ''}</span>`).join('')}
+        </div>
+        <div class="lmstudio-model-actions">
+          ${model.type === 'llm' ? `<button type="button" class="button secondary small" data-lmstudio-use="${escapeHTML(model.key)}">${selected ? 'Selected' : 'Use for text'}</button>` : ''}
+          ${instances.length
+            ? instances.map(instance => `<button type="button" class="button secondary small" data-lmstudio-unload="${escapeHTML(instance.id)}">Unload</button>`).join('')
+            : `<button type="button" class="button secondary small" data-lmstudio-load="${escapeHTML(model.key)}">Load</button>`}
+        </div>
+      </article>`;
+    }).join('')
+    : empty('No installed models found. Enter a model ID or Hugging Face URL below to download one.');
+  renderLMStudioDownloads();
+}
+
+function renderLMStudioDownloads() {
+  const container = $('#lmstudio-download-list');
+  const jobs = ui.lmStudioDownloadJobs || [];
+  container.innerHTML = jobs.length ? jobs.map(job => {
+    const total = Number(job.total_size_bytes);
+    const downloaded = Number(job.downloaded_bytes);
+    const progress = Number.isFinite(total) && total > 0 && Number.isFinite(downloaded)
+      ? Math.min(100, Math.round(downloaded / total * 100)) : null;
+    const status = job.error || job.status || 'checking';
+    return `<article class="lmstudio-download-card">
+      <div><strong>${escapeHTML(job.model || job.job_id || 'Model download')}</strong><span class="meta-line">${escapeHTML(status)}${progress === null ? '' : ` · ${progress}% (${formatModelSize(downloaded)} / ${formatModelSize(total)})`}</span></div>
+      ${progress === null ? '' : `<progress max="100" value="${progress}"></progress>`}
+    </article>`;
+  }).join('') : '';
+}
+
+function scheduleLMStudioDownloadRefresh() {
+  if (ui.lmStudioPollTimer) clearTimeout(ui.lmStudioPollTimer);
+  const hasActiveJobs = ui.lmStudioDownloadJobs.some(job => ['downloading', 'paused'].includes(job.status) && !job.error);
+  if (hasActiveJobs && $('#text-provider-select').value === 'lmstudio') {
+    ui.lmStudioPollTimer = setTimeout(() => refreshLMStudioModels({ silent: true }), 2000);
+  }
+}
+
+async function refreshLMStudioModels({ silent = false } = {}) {
+  if (ui.lmStudioRefreshing) return;
+  ui.lmStudioRefreshing = true;
+  try {
+    const response = await api('/api/configuration/lm-studio/models', {
+      method: 'POST',
+      body: JSON.stringify(lmStudioRequestSettings())
+    });
+    ui.lmStudioModels = response.result.models || [];
+    const llms = ui.lmStudioModels.filter(model => model.type === 'llm');
+    $('#lmstudio-model-suggestions').innerHTML = llms.map(model =>
+      `<option value="${escapeHTML(model.key)}"></option>`
+    ).join('');
+
+    let refreshInventory = false;
+    for (const job of ui.lmStudioDownloadJobs) {
+      if (!['downloading', 'paused'].includes(job.status)) continue;
+      try {
+        const statusResponse = await api('/api/configuration/lm-studio/models/download-status', {
+          method: 'POST',
+          body: JSON.stringify({ ...lmStudioRequestSettings(), jobId: job.job_id })
+        });
+        Object.assign(job, statusResponse.result);
+        delete job.error;
+        if (job.status === 'completed') refreshInventory = true;
+      } catch (error) {
+        job.error = error.message;
+      }
+    }
+    if (refreshInventory) {
+      const updated = await api('/api/configuration/lm-studio/models', {
+        method: 'POST',
+        body: JSON.stringify(lmStudioRequestSettings())
+      });
+      ui.lmStudioModels = updated.result.models || [];
+    }
+    localStorage.setItem('lmstudio_download_jobs', JSON.stringify(ui.lmStudioDownloadJobs.slice(-10)));
+    renderLMStudioModels();
+    if (!silent) showToast(`LM Studio connected · ${ui.lmStudioModels.length} local model(s) found.`);
+    scheduleLMStudioDownloadRefresh();
+    return ui.lmStudioModels;
+  } catch (error) {
+    $('#lmstudio-model-list').innerHTML = empty('LM Studio is not reachable. Start the local server, check its URL/API token, then refresh.');
+    if (!silent) showToast(error.message, 'error');
+    return null;
+  } finally {
+    ui.lmStudioRefreshing = false;
+  }
+}
+
+async function loadVoiceboxCatalog(baseUrl, { silent = false } = {}) {
+  try {
+    const query = baseUrl ? `?baseUrl=${encodeURIComponent(baseUrl)}` : '';
+    const response = await api(`/api/configuration/voicebox/catalog${query}`);
+    ui.voiceboxCatalog = response.result;
+    populateVoiceboxCatalog(ui.voiceboxCatalog);
+    $('#voicebox-model-note').textContent = 'Loaded status is live. Downloaded models remain cached on disk after unload; a model is loaded automatically for preview or narration when needed.';
+    return ui.voiceboxCatalog;
+  } catch (error) {
+    $('#voicebox-model-list').innerHTML = empty('Voicebox is not reachable. Start it, confirm its local API URL, then refresh.');
+    $('#voicebox-hardware-status').textContent = error.message;
+    if (!silent) throw error;
+    return null;
+  }
 }
 
 function switchView(view) {
@@ -1881,9 +2207,31 @@ $('#profile-form').addEventListener('submit', async event => {
       video_provider: values.videoProvider,
       video_generation_mode: values.videoGenerationMode,
       video_clip_duration: Number(values.videoClipDuration),
-      video_max_generated_seconds: Number(values.videoMaxGeneratedSeconds)
+      video_max_generated_seconds: Number(values.videoMaxGeneratedSeconds),
+      comfyui_base_url: values.comfyuiBaseURL,
+      comfyui_frame_rate: Number(values.comfyuiFrameRate),
+      comfyui_workflow: values.comfyuiWorkflow,
+      comfyui_api_key: values.comfyuiApiKey
     }, 'Operator settings saved.');
+    event.currentTarget.elements.comfyuiApiKey.value = '';
   } catch (_error) { /* toast already shown */ }
+});
+
+$('#test-comfyui-connection').addEventListener('click', async () => {
+  const form = $('#profile-form');
+  try {
+    const response = await api('/api/video/comfyui/check', {
+      method: 'POST',
+      body: JSON.stringify({
+        baseURL: form.elements.comfyuiBaseURL.value,
+        workflow: form.elements.comfyuiWorkflow.value,
+        apiKey: form.elements.comfyuiApiKey.value
+      })
+    });
+    showToast(response.result.message);
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
 });
 
 $('#text-provider-select').addEventListener('change', () => {
@@ -1891,6 +2239,9 @@ $('#text-provider-select').addEventListener('change', () => {
 });
 
 $('#tts-provider-select').addEventListener('change', updateTTSFields);
+
+$('#voicebox-engine').addEventListener('change', updateVoiceboxEngineFields);
+$('#voicebox-profile').addEventListener('change', updateVoiceboxEngineFields);
 
 $('#integrations-form').addEventListener('submit', async event => {
   event.preventDefault();
@@ -1903,7 +2254,7 @@ $('#integrations-form').addEventListener('submit', async event => {
       body: JSON.stringify({
         textProvider: {
           provider,
-          model: provider === 'local' ? values.textModelCustom : values.textModel,
+          model: ['local', 'lmstudio'].includes(provider) ? values.textModelCustom : values.textModel,
           baseURL: values.localBaseURL,
           apiKey: values.textApiKey
         },
@@ -1916,7 +2267,10 @@ $('#integrations-form').addEventListener('submit', async event => {
             engine: values.voiceboxEngine,
             modelSize: values.voiceboxModelSize,
             language: values.voiceboxLanguage,
-            instruct: values.voiceboxInstruct
+            instruct: values.voiceboxInstruct,
+            maxChunkChars: Number(values.voiceboxMaxChunkChars),
+            crossfadeMs: Number(values.voiceboxCrossfadeMs),
+            normalize: form.elements.voiceboxNormalize.checked
           },
           elevenLabs: {
             apiKey: values.elevenLabsApiKey,
@@ -1940,6 +2294,7 @@ $('#test-local-model').addEventListener('click', async () => {
     const response = await api('/api/configuration/local-model/check', {
       method: 'POST',
       body: JSON.stringify({
+        provider: $('#text-provider-select').value,
         baseURL: $('#local-model-url').value,
         model: $('#text-model-custom').value,
         apiKey: $('#integrations-form').elements.textApiKey.value
@@ -1951,25 +2306,247 @@ $('#test-local-model').addEventListener('click', async () => {
   }
 });
 
+$('#find-lmstudio-models').addEventListener('click', async () => {
+  await refreshLMStudioModels();
+});
+
+$('#refresh-lmstudio-models').addEventListener('click', () => refreshLMStudioModels());
+
+$('#lmstudio-model-list').addEventListener('click', async event => {
+  const useModel = event.target.closest('[data-lmstudio-use]');
+  if (useModel) {
+    $('#text-model-custom').value = useModel.dataset.lmstudioUse;
+    renderLMStudioModels();
+    return;
+  }
+
+  const loadModel = event.target.closest('[data-lmstudio-load]');
+  const unloadModel = event.target.closest('[data-lmstudio-unload]');
+  if (!loadModel && !unloadModel) return;
+  const model = loadModel?.dataset.lmstudioLoad || '';
+  if (model) $('#text-model-custom').value = model;
+  try {
+    const response = await api(
+      loadModel ? '/api/configuration/lm-studio/models/load' : '/api/configuration/lm-studio/models/unload',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          ...lmStudioRequestSettings(),
+          ...(loadModel ? {
+            model,
+            contextLength: $('#lmstudio-context-length').value,
+            evalBatchSize: $('#lmstudio-eval-batch-size').value,
+            numExperts: $('#lmstudio-num-experts').value,
+            flashAttention: $('#lmstudio-flash-attention').checked,
+            offloadKVCacheToGPU: $('#lmstudio-kv-cache-gpu').checked
+          } : { instanceId: unloadModel.dataset.lmstudioUnload })
+        })
+      }
+    );
+    showToast(loadModel
+      ? `Model loaded: ${response.result.instance_id || model}`
+      : `Model unloaded: ${response.result.instance_id || unloadModel.dataset.lmstudioUnload}`);
+    await refreshLMStudioModels({ silent: true });
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+});
+
+$('#download-lmstudio-model').addEventListener('click', async () => {
+  try {
+    const response = await api('/api/configuration/lm-studio/models/download', {
+      method: 'POST',
+      body: JSON.stringify({
+        ...lmStudioRequestSettings(),
+        model: $('#lmstudio-download-model').value,
+        quantization: $('#lmstudio-quantization').value
+      })
+    });
+    const job = response.result;
+    if (job.job_id) {
+      ui.lmStudioDownloadJobs = [
+        ...ui.lmStudioDownloadJobs.filter(item => item.job_id !== job.job_id),
+        { ...job, model: $('#lmstudio-download-model').value }
+      ].slice(-10);
+      localStorage.setItem('lmstudio_download_jobs', JSON.stringify(ui.lmStudioDownloadJobs));
+      renderLMStudioDownloads();
+      showToast(`LM Studio download ${job.status || 'started'} · ${job.job_id}`);
+    } else {
+      showToast(`LM Studio reports this model is ${job.status || 'already available'}.`);
+    }
+    await refreshLMStudioModels({ silent: true });
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+});
+
 $('#check-voicebox').addEventListener('click', async () => {
   try {
-    const response = await api('/api/configuration/voicebox/check', {
-      method: 'POST',
-      body: JSON.stringify({ baseUrl: $('#integrations-form').elements.voiceboxBaseURL.value })
-    });
-    const select = $('#voicebox-profile');
-    const savedValue = select.value;
-    select.innerHTML = response.result.profiles.length
-      ? response.result.profiles.map(profile => {
-        const description = [profile.language, profile.engine].filter(Boolean).join(' · ');
-        return `<option value="${escapeHTML(profile.id)}">${escapeHTML(profile.name || profile.id)}${description ? ` · ${escapeHTML(description)}` : ''}</option>`;
-      }).join('')
-      : '<option value="">No profiles found</option>';
-    if (response.result.profiles.some(profile => profile.id === savedValue)) select.value = savedValue;
-    if (response.result.profiles.length) showToast(`Voicebox connected · ${response.result.profiles.length} profile(s) found.`);
+    const catalog = await loadVoiceboxCatalog($('#integrations-form').elements.voiceboxBaseURL.value);
+    if (catalog?.profiles.length) showToast(`Voicebox connected · ${catalog.profiles.length} profile(s) and ${catalog.engines.length} TTS engines found.`);
     else showToast('Voicebox is running, but it has no voice profiles.', 'error');
   } catch (error) {
     showToast(error.message, 'error');
+  }
+});
+
+$('#voicebox-preset-engine').addEventListener('change', updatePresetVoiceOptions);
+$('#voicebox-preset-voice').addEventListener('change', event => {
+  const voice = ui.voiceboxCatalog?.presets?.[$('#voicebox-preset-engine').value]
+    ?.find(item => item.voice_id === event.currentTarget.value);
+  if (voice && !$('#voicebox-preset-name').value.trim()) {
+    $('#voicebox-preset-name').value = `${voice.name} narrator`;
+  }
+});
+
+$('#create-voicebox-preset').addEventListener('click', async event => {
+  const button = event.currentTarget;
+  const engine = $('#voicebox-preset-engine').value;
+  const voiceId = $('#voicebox-preset-voice').value;
+  const name = $('#voicebox-preset-name').value.trim();
+  if (!voiceId || !name) {
+    showToast('Choose a preset voice and enter a profile name.', 'error');
+    return;
+  }
+  button.disabled = true;
+  try {
+    const response = await api('/api/configuration/voicebox/profiles/preset', {
+      method: 'POST',
+      body: JSON.stringify({
+        baseUrl: $('#integrations-form').elements.voiceboxBaseURL.value,
+        engine,
+        voiceId,
+        name
+      })
+    });
+    $('#voicebox-profile').dataset.savedProfile = response.result.id;
+    $('#voicebox-engine').dataset.savedEngine = engine;
+    $('#voicebox-preset-name').value = '';
+    await loadVoiceboxCatalog($('#integrations-form').elements.voiceboxBaseURL.value);
+    $('#voicebox-profile').value = response.result.id;
+    updateVoiceboxEngineFields();
+    showToast(`Voicebox preset profile “${response.result.name}” created.`);
+  } catch (error) {
+    showToast(error.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$('#refresh-voicebox-models').addEventListener('click', async () => {
+  try {
+    await loadVoiceboxCatalog($('#integrations-form').elements.voiceboxBaseURL.value);
+    showToast('Voicebox model inventory refreshed.');
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+});
+
+$('#voicebox-model-list').addEventListener('click', async event => {
+  const button = event.target.closest('[data-voicebox-model-action]');
+  if (!button) return;
+  const action = button.dataset.voiceboxModelAction;
+  const modelName = button.dataset.modelName;
+  if (action === 'unload' && !confirm(`Unload ${modelName} from GPU memory? The downloaded model files will remain on disk.`)) return;
+  button.disabled = true;
+  try {
+    const response = await api(`/api/configuration/voicebox/models/${encodeURIComponent(modelName)}/${action}`, {
+      method: 'POST',
+      body: JSON.stringify({ baseUrl: $('#integrations-form').elements.voiceboxBaseURL.value })
+    });
+    showToast(response.result?.message || `Voicebox ${modelName}: ${action} requested.`);
+    await loadVoiceboxCatalog($('#integrations-form').elements.voiceboxBaseURL.value);
+  } catch (error) {
+    showToast(error.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$('#voicebox-preview-button').addEventListener('click', async event => {
+  const button = event.currentTarget;
+  const profileId = $('#voicebox-profile').value;
+  const engine = $('#voicebox-engine').value;
+  const text = $('#voicebox-preview-text').value.trim();
+  if (!profileId || !text) {
+    showToast('Choose a Voicebox profile and enter preview text.', 'error');
+    return;
+  }
+  button.disabled = true;
+  $('#voicebox-preview-status').textContent = 'Generating locally…';
+  try {
+    const response = await fetch('/api/configuration/voicebox/preview', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(apiKey() ? { 'x-api-key': apiKey() } : {})
+      },
+      body: JSON.stringify({
+        baseUrl: $('#integrations-form').elements.voiceboxBaseURL.value,
+        profileId,
+        engine,
+        text,
+        language: $('#voicebox-language').value,
+        modelSize: $('#voicebox-model-size').value,
+        instruct: $('#integrations-form').elements.voiceboxInstruct.value,
+        maxChunkChars: Number($('#integrations-form').elements.voiceboxMaxChunkChars.value),
+        crossfadeMs: Number($('#integrations-form').elements.voiceboxCrossfadeMs.value)
+      })
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.error || response.statusText || 'Voicebox preview failed');
+    }
+    const blob = await response.blob();
+    if (ui.voiceboxPreviewUrl) URL.revokeObjectURL(ui.voiceboxPreviewUrl);
+    ui.voiceboxPreviewUrl = URL.createObjectURL(blob);
+    const audio = $('#voicebox-preview-audio');
+    audio.src = ui.voiceboxPreviewUrl;
+    audio.classList.remove('hidden');
+    $('#voicebox-preview-status').textContent = `${(blob.size / 1024).toFixed(0)} KB WAV preview ready.`;
+    await loadVoiceboxCatalog($('#integrations-form').elements.voiceboxBaseURL.value, { silent: true });
+  } catch (error) {
+    $('#voicebox-preview-status').textContent = error.message;
+    showToast(error.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$('#voicebox-transcription-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const file = $('#voicebox-audio-file').files[0];
+  if (!file) {
+    showToast('Choose an audio file to transcribe.', 'error');
+    return;
+  }
+  if (file.size > 200 * 1024 * 1024) {
+    showToast('Audio uploads are limited to 200 MB.', 'error');
+    return;
+  }
+  const button = $('#voicebox-transcribe-button');
+  button.disabled = true;
+  $('#voicebox-transcription-status').textContent = 'Transcribing locally with Voicebox Whisper…';
+  try {
+    const query = [
+      ['model', $('#voicebox-whisper-model').value],
+      ['language', $('#voicebox-whisper-language').value],
+      ['filename', file.name],
+      ['baseUrl', $('#integrations-form').elements.voiceboxBaseURL.value]
+    ].map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`).join('&');
+    const response = await api(`/api/configuration/voicebox/transcribe?${query}`, {
+      method: 'POST',
+      body: file,
+      headers: { 'Content-Type': file.type || 'application/octet-stream' }
+    });
+    $('#voicebox-transcription-result').value = response.result.text;
+    $('#voicebox-transcription-status').textContent = `Transcribed ${file.name}${response.result.duration ? ` · ${Number(response.result.duration).toFixed(1)} seconds` : ''}.`;
+    await loadVoiceboxCatalog($('#integrations-form').elements.voiceboxBaseURL.value, { silent: true });
+  } catch (error) {
+    $('#voicebox-transcription-status').textContent = error.message;
+    showToast(error.message, 'error');
+  } finally {
+    button.disabled = false;
   }
 });
 

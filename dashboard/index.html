@@ -273,10 +273,30 @@
               <div class="panel-heading"><div><p class="eyebrow">SCRIPTING & PLANNING</p><h2>AI text provider</h2></div></div>
               <label><span>Provider</span><select name="textProvider" id="text-provider-select"></select></label>
               <label id="text-model-select-wrap"><span>Model</span><select name="textModel" id="text-model-select"></select></label>
-              <label id="text-model-custom-wrap" class="hidden"><span>Model ID in your local server</span><input name="textModelCustom" id="text-model-custom" maxlength="200" placeholder="For example: qwen2.5-7b-instruct"></label>
-              <label id="local-model-url-wrap" class="hidden"><span>Local model server URL</span><input name="localBaseURL" id="local-model-url" type="url" placeholder="http://127.0.0.1:8080/v1"><small>Use an OpenAI-compatible llama.cpp server loading your .gguf model. Localhost only.</small></label>
-              <label><span>API key <small>(optional for local GGUF; leave blank to keep the saved key)</small></span><input name="textApiKey" type="password" autocomplete="new-password" placeholder="Saved keys are never displayed"></label>
-              <div class="form-actions"><button type="button" id="test-local-model" class="button secondary hidden">Test local model</button></div>
+              <label id="text-model-custom-wrap" class="hidden"><span>Model ID in your local server</span><input name="textModelCustom" id="text-model-custom" list="lmstudio-model-suggestions" maxlength="200" placeholder="For example: qwen2.5-7b-instruct"><datalist id="lmstudio-model-suggestions"></datalist></label>
+              <label id="local-model-url-wrap" class="hidden"><span>Local model server URL</span><input name="localBaseURL" id="local-model-url" type="url" placeholder="http://127.0.0.1:8080/v1"><small id="local-model-url-hint">Use an OpenAI-compatible local server. Localhost only.</small></label>
+              <label><span>API key <small>(optional for local servers; leave blank to keep the saved key)</small></span><input name="textApiKey" type="password" autocomplete="new-password" placeholder="Saved keys are never displayed"></label>
+              <div class="form-actions"><button type="button" id="find-lmstudio-models" class="button secondary hidden">Find LM Studio models</button><button type="button" id="test-local-model" class="button secondary hidden">Test local model</button></div>
+              <div id="lmstudio-management" class="provider-fields hidden">
+                <div class="panel-heading"><div><p class="eyebrow">LM STUDIO V1 API</p><h3>Local model manager</h3></div><button type="button" id="refresh-lmstudio-models" class="button secondary small">Refresh</button></div>
+                <p class="meta-line">List installed models, see loaded instances, and manage local downloads and memory.</p>
+                <div id="lmstudio-model-list" class="lmstudio-model-list"></div>
+                <div class="form-grid two">
+                  <label><span>Context length when loading</span><input id="lmstudio-context-length" type="number" min="512" max="262144" step="1" value="4096"></label>
+                  <label><span>Evaluation batch size (optional)</span><input id="lmstudio-eval-batch-size" type="number" min="1" max="262144" step="1" placeholder="Use LM Studio default"></label>
+                </div>
+                <div class="form-grid two">
+                  <label><span>MoE expert count (optional)</span><input id="lmstudio-num-experts" type="number" min="1" max="1024" step="1" placeholder="Use model default"></label>
+                  <div class="form-actions"><label class="toggle"><input id="lmstudio-flash-attention" type="checkbox" checked><span></span>Flash Attention</label><label class="toggle"><input id="lmstudio-kv-cache-gpu" type="checkbox" checked><span></span>Offload KV cache to GPU</label></div>
+                </div>
+                <div class="form-grid two">
+                  <label><span>Download model ID or Hugging Face URL</span><input id="lmstudio-download-model" maxlength="500" placeholder="publisher/model-name or https://huggingface.co/..."></label>
+                  <label><span>Quantization (optional, HF URL only)</span><input id="lmstudio-quantization" maxlength="40" placeholder="Q4_K_M"></label>
+                </div>
+                <div class="form-actions"><button type="button" id="download-lmstudio-model" class="button secondary">Download model</button></div>
+                <div id="lmstudio-download-list" class="lmstudio-download-list"></div>
+                <small>Downloads may be large and consume disk space. Model load/unload affects LM Studio memory immediately.</small>
+              </div>
             </article>
             <article class="panel">
               <div class="panel-heading"><div><p class="eyebrow">NARRATION</p><h2>Text-to-speech provider</h2></div></div>
@@ -287,12 +307,30 @@
                   <label><span>Voice profile</span><select name="voiceboxProfileId" id="voicebox-profile"><option value="">Enter profile ID or check server</option></select></label>
                   <button type="button" id="check-voicebox" class="button secondary align-end">Find profiles</button>
                 </div>
+                <label><span>TTS engine</span><select name="voiceboxEngine" id="voicebox-engine"></select><small id="voicebox-engine-hint"></small></label>
+                <label id="voicebox-model-size-wrap"><span>Model variant</span><select name="voiceboxModelSize" id="voicebox-model-size"></select></label>
                 <div class="form-grid two">
-                  <label><span>Engine <small>(optional)</small></span><input name="voiceboxEngine" placeholder="Use profile default"></label>
-                  <label><span>Model size <small>(optional)</small></span><input name="voiceboxModelSize" placeholder="Use profile default"></label>
-                  <label><span>Language</span><input name="voiceboxLanguage" maxlength="20" placeholder="en"></label>
-                  <label><span>Voice instructions <small>(optional)</small></span><input name="voiceboxInstruct" maxlength="500" placeholder="Use profile default"></label>
+                  <label><span>Language</span><select name="voiceboxLanguage" id="voicebox-language"></select></label>
+                  <label><span>Voice instructions <small>(optional)</small></span><input name="voiceboxInstruct" maxlength="500" placeholder="For example: warm, measured delivery"></label>
+                  <label><span>Chunk length</span><input name="voiceboxMaxChunkChars" type="number" min="100" max="5000" step="100"><small>Long scripts are split and crossfaded at sentence boundaries.</small></label>
+                  <label><span>Chunk crossfade</span><input name="voiceboxCrossfadeMs" type="number" min="0" max="500" step="10"><small>Milliseconds blended between generated segments.</small></label>
+                  <label class="toggle"><input name="voiceboxNormalize" type="checkbox"><span></span> Normalize narration audio</label>
                 </div>
+                <div class="preset-profile-create">
+                  <p class="eyebrow">PRESET VOICES</p>
+                  <div class="form-grid">
+                    <label><span>Preset engine</span><select id="voicebox-preset-engine"><option value="kokoro">Kokoro 82M</option><option value="qwen_custom_voice">Qwen CustomVoice 1.7B</option></select></label>
+                    <label><span>Preset voice</span><select id="voicebox-preset-voice"><option value="">Connect Voicebox to list voices</option></select></label>
+                    <label><span>Profile name</span><input id="voicebox-preset-name" maxlength="100" placeholder="For example: Kokoro English narrator"></label>
+                    <button type="button" id="create-voicebox-preset" class="button secondary align-end">Create preset profile</button>
+                  </div>
+                </div>
+                <div class="voicebox-preview">
+                  <label><span>Test narration</span><textarea id="voicebox-preview-text" rows="3" maxlength="2000">Hello! This is a short voice preview from Voicebox.</textarea></label>
+                  <div class="form-actions"><button type="button" id="voicebox-preview-button" class="button secondary">Generate voice preview</button><span id="voicebox-preview-status" class="meta-line"></span></div>
+                  <audio id="voicebox-preview-audio" class="hidden" controls></audio>
+                </div>
+                <p class="callout">Voicebox loads the selected model when needed. Use the model manager below to inspect downloaded/loaded models and unload models you no longer need. Qwen 1.7B plus Whisper Large uses about 9 GB of your 12 GB VRAM.</p>
               </div>
               <div id="elevenlabs-settings" class="provider-fields hidden">
                 <label><span>ElevenLabs Voice ID</span><input name="elevenLabsVoiceId" autocomplete="off"></label>
@@ -305,6 +343,22 @@
           </div>
           <div class="form-actions"><button type="submit" class="button primary">Save provider settings</button></div>
         </form>
+        <article class="panel voicebox-model-panel">
+          <div class="panel-heading"><div><p class="eyebrow">LOCAL MODEL MEMORY</p><h2>Voicebox model manager</h2><p id="voicebox-hardware-status" class="meta-line">Connect Voicebox to inspect downloaded models and GPU memory.</p></div><button type="button" id="refresh-voicebox-models" class="button secondary small">Refresh models</button></div>
+          <div id="voicebox-model-list" class="voicebox-model-list"></div>
+          <p id="voicebox-model-note" class="callout">Loading or unloading a model can take time. Unload models you are not using to free VRAM; cached weights remain on disk.</p>
+        </article>
+        <article class="panel voicebox-transcription-panel">
+          <div class="panel-heading"><div><p class="eyebrow">WHISPER SPEECH-TO-TEXT</p><h2>Transcribe audio locally</h2><p>Choose Whisper Large v3 for non-English accuracy or Turbo for faster transcription. Audio is sent only to your configured local Voicebox server.</p></div></div>
+          <form id="voicebox-transcription-form" class="form-grid">
+            <label><span>Audio file</span><input id="voicebox-audio-file" type="file" accept="audio/*,.wav,.mp3,.m4a,.ogg,.flac,.aac,.webm,.opus" required><small>Maximum upload size: 200 MB.</small></label>
+            <label><span>Whisper model</span><select id="voicebox-whisper-model"></select></label>
+            <label><span>Language <small>(leave automatic to detect)</small></span><select id="voicebox-whisper-language"></select></label>
+            <div class="form-actions align-end"><button type="submit" id="voicebox-transcribe-button" class="button secondary">Transcribe audio</button></div>
+            <label class="full-row"><span>Transcript</span><textarea id="voicebox-transcription-result" rows="5" readonly placeholder="Your local Whisper transcript will appear here."></textarea></label>
+            <p id="voicebox-transcription-status" class="meta-line full-row"></p>
+          </form>
+        </article>
         <article class="panel youtube-setup-panel">
           <div class="panel-heading"><div><p class="eyebrow">PUBLISHING & CHANNEL DATA</p><h2>YouTube connection</h2></div><span id="youtube-connection-status" class="status">Not connected</span></div>
           <p>Use an OAuth client from Google Cloud Console with the YouTube Data API enabled. Your client secret and OAuth tokens are stored locally with owner-only permissions.</p>
@@ -331,10 +385,15 @@
             <label class="toggle"><input id="notifications-enabled" type="checkbox"><span></span> Save operator notifications</label>
           </div>
           <div class="form-grid video-provider-settings">
-            <label><span>Video provider</span><select name="videoProvider"><option value="slideshow">Local slideshow · no provider cost</option><option value="auto">Automatic capability routing</option><option value="seedance">ByteDance Seedance 2.5</option><option value="minimax_h3">MiniMax H3</option><option value="google_omni">Google Gemini Omni Flash</option><option value="kling">Kuaishou Kling 3.0 Omni</option><option value="wan">Alibaba Wan 2.7</option></select><small id="video-provider-status">Provider credentials are checked at runtime.</small></label>
+            <label><span>Video provider</span><select name="videoProvider"><option value="slideshow">Local slideshow · no provider cost</option><option value="comfyui">ComfyUI · local video generation</option><option value="auto">Automatic capability routing</option><option value="seedance">ByteDance Seedance 2.5</option><option value="minimax_h3">MiniMax H3</option><option value="google_omni">Google Gemini Omni Flash</option><option value="kling">Kuaishou Kling 3.0 Omni</option><option value="wan">Alibaba Wan 2.7</option></select><small id="video-provider-status">Provider credentials are checked at runtime.</small></label>
             <label><span>Generation mode</span><select name="videoGenerationMode"><option value="hybrid">Hybrid · generated clips + local assembly</option><option value="slideshow">Local slideshow only</option></select></label>
             <label><span>Clip duration</span><input name="videoClipDuration" type="number" min="3" max="30" step="1"></label>
-            <label><span>Paid seconds cap</span><input name="videoMaxGeneratedSeconds" type="number" min="0" max="600" step="1"><small>Maximum provider-generated seconds per production.</small></label>
+            <label><span>Generated video seconds cap</span><input name="videoMaxGeneratedSeconds" type="number" min="0" max="600" step="1"><small>Maximum generated video seconds per production; applies to local and paid providers.</small></label>
+            <label><span>ComfyUI server URL</span><input name="comfyuiBaseURL" type="url" value="http://127.0.0.1:8188" autocomplete="url"><small>Localhost only. Start ComfyUI with its server enabled.</small></label>
+            <label><span>Video frame rate</span><input name="comfyuiFrameRate" type="number" min="1" max="60" step="1" value="24"><small>Used to calculate the workflow frame-count placeholder.</small></label>
+            <label><span>ComfyUI API token <small>(optional; leave blank to keep saved token)</small></span><input name="comfyuiApiKey" type="password" autocomplete="new-password"></label>
+            <div class="form-actions align-end"><button type="button" id="test-comfyui-connection" class="button secondary">Test ComfyUI connection</button></div>
+            <label class="full-row"><span>ComfyUI API workflow JSON</span><textarea name="comfyuiWorkflow" rows="9" spellcheck="false" placeholder='Paste the API-format workflow JSON exported by ComfyUI. Replace its text prompt with {{PROMPT}}.'></textarea><small>In ComfyUI, enable Dev mode, use “Save (API Format)”, and paste the exported workflow here. Required: <code>{{PROMPT}}</code>. Optional placeholders: <code>{{DURATION}}</code>, <code>{{FRAMES}}</code>, <code>{{WIDTH}}</code>, <code>{{HEIGHT}}</code>, <code>{{SEED}}</code>. The workflow must save an MP4 video output. Local ComfyUI only—no cloud images are generated when this provider is selected.</small></label>
           </div>
           <div class="form-actions"><button type="submit" class="button primary">Save channel setup</button><button id="api-key-button" type="button" class="button secondary">Set dashboard API key</button></div>
         </form>

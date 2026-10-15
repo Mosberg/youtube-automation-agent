@@ -552,7 +552,7 @@ class CredentialManager {
   // Validation methods
   hasAITextProvider() {
     if (
-      this.credentials.aiProvider?.provider === 'local' &&
+      ['local', 'lmstudio'].includes(this.credentials.aiProvider?.provider) &&
       this.credentials.aiProvider?.baseURL &&
       this.credentials.aiProvider?.model
     ) {

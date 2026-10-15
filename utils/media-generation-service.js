@@ -9,6 +9,7 @@ const TERMINAL = new Set(['succeeded', 'failed', 'cancelled']);
 class MediaGenerationService {
   constructor(db, credentials = {}, options = {}) {
     this.db = db;
+    this.credentials = credentials;
     this.registry = options.registry || new VideoProviderRegistry(credentials, options.providerOptions);
     this.logger = options.logger || new Logger('MediaGeneration');
     this.pollIntervalMs = Math.max(10, Number(options.pollIntervalMs ?? process.env.VIDEO_PROVIDER_POLL_MS ?? 5000));
@@ -21,7 +22,7 @@ class MediaGenerationService {
     const provider = process.env.VIDEO_PROVIDER || stored.video_provider || 'slideshow';
     const order = String(process.env.VIDEO_PROVIDER_ORDER || stored.video_provider_order || DEFAULT_PROVIDER_ORDER.join(','))
       .split(',').map(value => value.trim()).filter(Boolean);
-    return {
+    const settings = {
       provider,
       order,
       mode: process.env.VIDEO_GENERATION_MODE || stored.video_generation_mode || 'hybrid',
@@ -29,8 +30,18 @@ class MediaGenerationService {
       maxGeneratedSeconds: Math.max(0, Number(process.env.VIDEO_MAX_GENERATED_SECONDS || stored.video_max_generated_seconds || 60)),
       generateAudio: false,
       resolution: process.env.VIDEO_RESOLUTION || stored.video_resolution || '720p',
-      aspectRatio: process.env.VIDEO_ASPECT_RATIO || stored.video_aspect_ratio || '16:9'
+      aspectRatio: process.env.VIDEO_ASPECT_RATIO || stored.video_aspect_ratio || '16:9',
+      comfyui: {
+        baseURL: process.env.COMFYUI_BASE_URL || stored.comfyui_base_url || 'http://127.0.0.1:8188',
+        workflow: stored.comfyui_workflow ? JSON.parse(stored.comfyui_workflow) : null,
+        frameRate: Number(stored.comfyui_frame_rate || 24),
+        apiKey: this.credentials?.credentials?.comfyui?.apiKey ||
+          this.credentials?.comfyui?.apiKey ||
+          this.registry.get('comfyui')?.apiKey || ''
+      }
     };
+    this.registry.get('comfyui')?.configure(settings.comfyui);
+    return settings;
   }
 
   listProviders() { return this.registry.list(); }
@@ -76,6 +87,10 @@ class MediaGenerationService {
     };
     const provider = this.registry.select(settings.provider, settings.order, routingRequest);
     const providerInfo = provider.describe();
+    if (settings.provider === 'comfyui' && provider.id !== 'comfyui' &&
+        settings.mode !== 'slideshow' && settings.maxGeneratedSeconds !== 0) {
+      throw new Error('ComfyUI is selected but no valid API workflow is configured. Import a workflow in dashboard settings before generating.');
+    }
     if (provider.id === 'slideshow' || settings.mode === 'slideshow' || settings.maxGeneratedSeconds === 0) {
       return { clips: [], requestedProvider: settings.provider, actualProvider: 'slideshow', model: 'local-ffmpeg', settings };
     }
@@ -205,7 +220,8 @@ class MediaGenerationService {
     return {
       outputUrl: remote.outputUrl || null,
       taskType: remote.taskType || null,
-      model: remote.model || null
+      model: remote.model || null,
+      baseURL: remote.baseURL || remote.providerData?.baseURL || null
     };
   }
 

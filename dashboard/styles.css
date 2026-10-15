@@ -372,6 +372,25 @@ label:has(input:disabled) > span { color: var(--muted); }
 .youtube-setup-panel { max-width: 920px; margin: 16px 0; }
 .youtube-setup-panel > p { color: var(--muted); font-size: 12px; line-height: 1.6; }
 .youtube-setup-panel .form-grid { gap: 14px; }
+.voicebox-model-panel, .voicebox-transcription-panel { max-width: 920px; margin: 16px 0; }
+.voicebox-model-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.voicebox-model-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; align-items: center; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-inset); padding: 12px; }
+.voicebox-model-card strong { display: block; color: var(--text); font-size: 12px; }
+.voicebox-model-card small { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
+.voicebox-model-card .status { justify-self: start; margin-top: 4px; }
+.voicebox-model-card .button { grid-column: 2; grid-row: 1 / span 2; }
+.voicebox-preview { display: grid; gap: 10px; border-top: 1px solid var(--line); padding-top: 14px; }
+.preset-profile-create { display: grid; gap: 8px; border-top: 1px solid var(--line); padding-top: 14px; }
+.preset-profile-create .eyebrow { margin: 0; }
+.voicebox-preview audio { width: 100%; }
+.voicebox-transcription-panel p { color: var(--muted); font-size: 12px; line-height: 1.55; }
+.voicebox-transcription-panel textarea[readonly] { color: var(--text-2); }
+.lmstudio-model-list, .lmstudio-download-list { display: grid; gap: 9px; }
+.lmstudio-model-card, .lmstudio-download-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-inset); padding: 12px; }
+.lmstudio-model-info, .lmstudio-model-actions, .lmstudio-download-card > div { display: grid; gap: 6px; }
+.lmstudio-model-info strong, .lmstudio-download-card strong { color: var(--text); font-size: 12px; overflow-wrap: anywhere; }
+.lmstudio-model-actions { grid-auto-flow: column; grid-auto-columns: max-content; align-items: center; }
+.lmstudio-download-card progress { width: 140px; }
 .align-end { align-self: end; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .form-grid.two { grid-template-columns: 1fr 1fr; }
@@ -728,8 +747,11 @@ label:has(input:disabled) > span { color: var(--muted); }
 
 /* ============ Responsive ============ */
 @media (max-width: 900px) {
+  .lmstudio-model-card { grid-template-columns: 1fr; }
+  .lmstudio-model-actions { grid-auto-flow: row; grid-auto-columns: auto; grid-template-columns: repeat(auto-fit, minmax(110px, max-content)); }
   .app-shell { grid-template-columns: minmax(0, 1fr); width: 100%; max-width: 100vw; overflow: hidden;     .integrations-grid { grid-template-columns: 1fr; }
     .setup-status-panel { grid-template-columns: 1fr; }
+    .voicebox-model-list { grid-template-columns: 1fr; }
   }
   .sidebar { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 14px 16px; }
   .brand { padding-bottom: 12px; }

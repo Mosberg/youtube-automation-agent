@@ -219,42 +219,45 @@ class ProductionManagementAgent {
   }
 
   async processThumbnail(thumbnail, script) {
-    try {
-      // Try to generate AI thumbnail first
-      const thumbnailScript = thumbnail.script || script || { title: thumbnail.title || 'Untitled Video' };
-      const aiThumbnail = await this.aiVideoGenerator.generateThumbnail(thumbnailScript, 'ethereal');
-      
-      return {
-        path: aiThumbnail.path,
-        originalPath: thumbnail.path,
-        dimensions: aiThumbnail.dimensions,
-        fileSize: aiThumbnail.fileSize,
-        generatedWith: 'AI'
-      };
-    } catch (error) {
-      this.logger.error('AI thumbnail generation failed:', error);
-      
-      // Fallback to original processing
-      const productionThumbnailPath = path.join(
-        __dirname, '..', 'data', 'assets', 
-        `thumbnail_${Date.now()}.jpg`
-      );
-      
-      if (thumbnail.path && await fs.access(thumbnail.path).then(() => true).catch(() => false)) {
-        const originalBuffer = await fs.readFile(thumbnail.path);
-        await fs.writeFile(productionThumbnailPath, originalBuffer);
-      } else {
-        // Create placeholder
-        await fs.writeFile(productionThumbnailPath + '.placeholder', 'Thumbnail placeholder');
+    if (await this.isComfyUISelected()) {
+      this.logger.info('ComfyUI selected; retaining the designed thumbnail without requesting cloud image generation.');
+    } else {
+      try {
+        const thumbnailScript = thumbnail.script || script || { title: thumbnail.title || 'Untitled Video' };
+        const aiThumbnail = await this.aiVideoGenerator.generateThumbnail(thumbnailScript, 'ethereal');
+        return {
+          path: aiThumbnail.path,
+          originalPath: thumbnail.path,
+          dimensions: aiThumbnail.dimensions,
+          fileSize: aiThumbnail.fileSize,
+          generatedWith: 'AI'
+        };
+      } catch (error) {
+        this.logger.error('AI thumbnail generation failed:', error);
       }
-      
-      return {
-        path: productionThumbnailPath,
-        originalPath: thumbnail.path,
-        dimensions: thumbnail.dimensions || { width: 1792, height: 1024 },
-        fileSize: thumbnail.fileSize || 0
-      };
     }
+
+    const productionThumbnailPath = path.join(__dirname, '..', 'data', 'assets', `thumbnail_${Date.now()}.jpg`);
+    if (thumbnail.path && await fs.access(thumbnail.path).then(() => true).catch(() => false)) {
+      const originalBuffer = await fs.readFile(thumbnail.path);
+      await fs.writeFile(productionThumbnailPath, originalBuffer);
+    } else {
+      await fs.writeFile(productionThumbnailPath + '.placeholder', 'Thumbnail placeholder');
+    }
+    return {
+      path: productionThumbnailPath,
+      originalPath: thumbnail.path,
+      dimensions: thumbnail.dimensions || { width: 1792, height: 1024 },
+      fileSize: thumbnail.fileSize || 0
+    };
+  }
+
+  async isComfyUISelected() {
+    const media = this.aiVideoGenerator.mediaGeneration;
+    if (!media) return false;
+    const settings = await media.settings();
+    return settings.provider === 'comfyui' ||
+      media.registry.select(settings.provider, settings.order, { duration: settings.clipDuration }).id === 'comfyui';
   }
 
   calculatePublishTime(strategy) {
@@ -304,10 +307,14 @@ class ProductionManagementAgent {
       const visualAssets = [];
       const profile = await this.db.getChannelProfile?.() || {};
       const visualStyle = profile.visual_style || 'ethereal';
-      
-      for (const prompt of visualPrompts) {
-        const assets = await this.aiVideoGenerator.generateVisualAssets(prompt, visualStyle, 1);
-        visualAssets.push(...assets);
+      const localComfy = await this.isComfyUISelected();
+      if (localComfy) {
+        this.logger.info('ComfyUI selected; using local text-to-video workflows without cloud image generation.');
+      } else {
+        for (const prompt of visualPrompts) {
+          const assets = await this.aiVideoGenerator.generateVisualAssets(prompt, visualStyle, 1);
+          visualAssets.push(...assets);
+        }
       }
       
       productionData.assets.video = {
@@ -316,7 +323,7 @@ class ProductionManagementAgent {
         format: 'mp4',
         resolution: '1920x1080',
         fps: 30,
-        generatedWith: 'AI'
+        generatedWith: localComfy ? 'ComfyUI' : 'AI'
       };
       
       productionData.timeline.videoGenerated = new Date().toISOString();

@@ -45,7 +45,7 @@ See the complete release history in [CHANGELOG.md](CHANGELOG.md).
 - **Self-hosted:** your credentials, media, and channel data stay under your control.
 - **Approval-first:** nothing is scheduled until quality, rights, and human-review gates pass by default.
 - **Strategy-driven:** give the Autonomous Channel Operator an objective, audience, pillars, cadence, and guardrails; it turns them into researched content plans and production runs.
-- **Provider-flexible:** use Anthropic Claude, Gemini, OpenAI, OpenRouter, Kimi, MiMo, GLM, or another OpenAI-compatible text endpoint, plus Seedance, MiniMax H3, Gemini Omni Flash, Kling, Wan, or local FFmpeg for video.
+- **Provider-flexible:** use Anthropic Claude, Gemini, OpenAI, OpenRouter, Kimi, MiMo, GLM, LM Studio, llama.cpp, or another OpenAI-compatible text endpoint, plus local ComfyUI workflows, Seedance, MiniMax H3, Gemini Omni Flash, Kling, Wan, or local FFmpeg for video.
 - **Observable:** follow persistent generation jobs, failures, review state, publishing, and local activation milestones from the dashboard.
 
 <!-- Launch gate: add only a real 30–45 second dashboard demo captured from a verified end-to-end run. -->
@@ -66,15 +66,32 @@ Already know what you are doing? `npm run setup` offers a shorter classic flow, 
 
 For direct Anthropic Claude access, choose **Anthropic Claude** in the walkthrough or set `ANTHROPIC_API_KEY` in `.env`. Claude handles text generation; configure Gemini or OpenAI separately if you also want AI-generated images or narration. Set `ANTHROPIC_MODEL` to override the default Claude model.
 
-### Local narration with Voicebox
+### Local narration and transcription with Voicebox
 
-[Voicebox](https://docs.voicebox.sh/) is a self-hosted, open-source voice studio and local TTS alternative to ElevenLabs. Install and launch Voicebox, create a voice profile, then select **Voicebox** in `npm run walkthrough` or `npm run setup`. Setup checks the local Voicebox API and lets you choose a profile. Lumen sends narration to Voicebox's `POST /generate/stream` endpoint and converts the returned WAV audio to MP3 for video assembly. Voicebox performs synthesis locally; the first generation may take longer while its selected model is loaded or downloaded.
+[Voicebox](https://docs.voicebox.sh/) is a self-hosted, open-source voice studio and local TTS alternative to ElevenLabs. Start the Voicebox backend on its default `http://127.0.0.1:8000` (the Voicebox desktop app may use `http://127.0.0.1:17493`), then open **Settings → Setup & controls → Voicebox** and select **Find profiles**. The dashboard reads Voicebox's live profile, GPU, and model inventory; it does not guess which weights are actually cached on this machine.
 
-For manual configuration, set `TTS_PROVIDER=voicebox`, `VOICEBOX_BASE_URL=http://127.0.0.1:8000`, and `VOICEBOX_PROFILE_ID` in `.env`. Optionally set `VOICEBOX_ENGINE`, `VOICEBOX_MODEL_SIZE`, `VOICEBOX_LANGUAGE`, and `VOICEBOX_INSTRUCT`; without an explicit engine, Voicebox uses the selected profile's default. Keep Voicebox's unauthenticated API bound to localhost; do not expose it directly to an untrusted network. Voicebox replaces narration only—OpenAI or Gemini is still needed for AI-generated images.
+The setup panel can use every TTS engine registered by the cloned Voicebox backend:
+
+- **Qwen TTS 1.7B** for high-quality cloned voices (the default for a cloned profile); Qwen CustomVoice 1.7B and VoiceDesign 1.7B for preset/designed voices.
+- **Chatterbox Multilingual** for 23-language voice cloning, including Danish; **Chatterbox Turbo** for fast English with expressive speech tags.
+- **LuxTTS** for fast English, **Kokoro 82M** for lightweight preset voices, and **TADA 1B / 3B Multilingual**.
+- **OmniVoice** for multilingual cloning; its upstream model is non-commercial, so use it only under the model's license.
+
+Select a compatible Voicebox profile, engine, model variant, language, and optional delivery instruction. The preset-voice section can create Kokoro or Qwen CustomVoice profiles from the presets exposed by Voicebox. **Generate voice preview** runs the real local inference path and returns WAV playback before saving settings. Production narration uses those same settings, including chunk length, crossfade, normalization, and Voicebox profile effects, then converts Voicebox WAV output to the project's MP3 format.
+
+The model manager shows which models are downloaded, loaded, or downloading, and offers download/load/unload actions. Unloading frees GPU memory but leaves model weights cached on disk. Qwen 1.7B and Whisper Large can coexist within a 12 GB GPU according to Voicebox's model guidance; the live memory readout helps you decide what to unload. For audio-to-text, **Transcribe audio locally** exposes Whisper Large v3 and Turbo with optional language selection. Voice uploads are sent to the configured Voicebox server and limited to 200 MB.
+
+Keep Voicebox's unauthenticated API bound to localhost; do not expose it directly to an untrusted network. Voicebox supplies local speech generation and transcription; it does not replace OpenAI/Gemini image generation or YouTube credentials.
 
 ### Configure providers in the dashboard
 
 Open **Settings → Setup & controls** to choose a text model, configure narration, discover Voicebox profiles, and authorize YouTube in a browser. API keys and OAuth tokens are saved only in local owner-only credential/token files; the dashboard reports whether a secret is configured but never returns its value. Leave a secret field blank to keep the saved key. Provider and YouTube changes require restarting AgentTube before the running agents use them.
+
+### LM Studio
+
+Use LM Studio 0.4.0 or newer, start its local server from the **Developer** tab, and select **LM Studio (local)** under **Settings → Setup & controls**. AgentTube defaults to `http://127.0.0.1:1234/v1`; use **Find LM Studio models** to list installed models and their load state. Select an LLM for scripts/planning, then **Test local model** before saving. If LM Studio's API authentication is enabled, enter its API token in the optional API key field.
+
+AgentTube uses the native v1 REST API for `/api/v1/models`, `/api/v1/chat`, and model download, download-status, load, and unload operations. The dashboard can manage installed model instances, context length, evaluation batch size, MoE expert count, Flash Attention, GPU KV-cache offload, model downloads by LM Studio catalog ID or Hugging Face URL, and download progress. API tokens are stored only in the local credentials file and are never returned to the dashboard. Model API requests are restricted to localhost. The selected model runs on your machine; AgentTube does not proxy inference to cloud services. Restart AgentTube after saving provider settings. Local text generation covers scripts and planning; image/video generation and narration still need their respective providers.
 
 ### Local GGUF models
 
@@ -84,7 +101,7 @@ Run a GGUF model using an OpenAI-compatible local server such as `llama.cpp`'s `
 llama-server -m "C:\models\your-model.gguf" --host 127.0.0.1 --port 8080 --alias local-model
 ```
 
-Set the server URL to `http://127.0.0.1:8080/v1`, the model ID to the server's model name/alias (for this example, `local-model`), and use **Test local model** before saving. The endpoint is restricted to localhost, does not require a cloud API key, and the model runs in the separately installed llama.cpp server; AgentTube does not download GGUF weights. Restart AgentTube after saving. A local text model handles scripts and planning, but image/video generation and narration still need their respective configured providers.
+Set the server URL to `http://127.0.0.1:8080/v1`, the model ID to the server's model name/alias (for this example, `local-model`), and use **Test local model** before saving. The endpoint is restricted to localhost, does not require a cloud API key, and the model runs in the separately installed llama.cpp server; AgentTube does not download GGUF weights. Restart AgentTube after saving. This setup and the LM Studio integration both use the OpenAI-compatible chat completions interface.
 
 ### Verify production readiness
 
@@ -290,8 +307,15 @@ Local slideshow rendering remains the default, so upgrading does not start paid 
 | Google | `gemini-omni-flash-preview` | Fast generation and conversational editing | 3–10 seconds |
 | Kuaishou | `kling-v3-omni` | Storyboards and character/voice consistency | 3–15 seconds |
 | Alibaba | Wan 2.7 task-specific models | Efficient generation, reference video, and continuation | 2–15 seconds |
+| Local ComfyUI | User-imported API workflow | Local text-to-video with your installed ComfyUI models and nodes | 2–30 seconds per scene |
 
 Long-form productions use hybrid assembly: Lumen generates bounded provider clips for the hook and important sections, fills the remaining timeline locally, mixes the existing narration, and keeps the generated caption file alongside the production. As soon as a provider returns its task ID, Lumen persists it before polling so interrupted jobs can resume that known task instead of submitting it again.
+
+#### Generate video locally with ComfyUI
+
+Start ComfyUI on `http://127.0.0.1:8188`, build or load a text-to-video workflow with an MP4 video output node, then enable **Settings → Dev mode options** and choose **Save (API Format)**. In AgentTube, open **Settings → Channel setup**, select **ComfyUI · local video generation**, paste the workflow JSON, and replace the positive-prompt text with `{{PROMPT}}`. Optional `{{DURATION}}`, `{{FRAMES}}`, `{{WIDTH}}`, `{{HEIGHT}}`, and `{{SEED}}` placeholders are substituted as numbers when used as complete input values. Save settings and use **Test ComfyUI connection** before generating.
+
+The server URL must be loopback (`localhost`, `127.0.0.1`, or `::1`); the optional API token is saved in the local credentials file, not the settings database. The workflow and its models/nodes are supplied by the operator—AgentTube does not install or select ComfyUI models. Selecting ComfyUI skips paid cloud image generation and uses generated local clips with local FFmpeg assembly and narration. ComfyUI failures do not silently turn into a slideshow; the production is marked simulated and blocked from upload. Ensure the ComfyUI workflow saves MP4 video and that its duration/frame settings are compatible with the installed model.
 
 ## Configuration
 
@@ -343,7 +367,9 @@ OPENAI_API_KEY=sk-...
 # ELEVENLABS_VOICE_ID=...
 
 # Optional: AI video generation
-# VIDEO_PROVIDER=slideshow # auto, seedance, minimax_h3, google_omni, kling, wan
+# VIDEO_PROVIDER=slideshow # auto, comfyui, seedance, minimax_h3, google_omni, kling, wan
+# COMFYUI_BASE_URL=http://127.0.0.1:8188
+# COMFYUI_API_KEY=...
 # VIDEO_GENERATION_MODE=hybrid
 # VIDEO_MAX_GENERATED_SECONDS=60
 # REPLICATE_API_TOKEN=...  # Seedance 2.5

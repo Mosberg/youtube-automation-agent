@@ -146,6 +146,18 @@ class ProductionReadinessService {
 
   async probeImage(tempDir, includePaidMedia) {
     if (this.probes.image) return this.probes.image({ tempDir, includePaidMedia });
+    const media = new MediaGenerationService(this.db, this.credentialManager.credentials || {});
+    const videoSettings = await media.settings();
+    const selectedVideoProvider = media.registry.select(videoSettings.provider, videoSettings.order, {
+      duration: videoSettings.clipDuration
+    });
+    if (videoSettings.provider === 'comfyui' || selectedVideoProvider.id === 'comfyui') {
+      return {
+        status: 'skipped',
+        message: 'ComfyUI is selected; generated local video supplies the visuals, so cloud image generation is not required.',
+        details: { provider: 'comfyui' }
+      };
+    }
     const generator = new AIVideoGenerator(this.credentialManager.credentials || {});
     if (!generator.openai && !generator.gemini) {
       return { status: 'warning', message: 'No AI image provider is configured; gradient visuals will be used.', remediation: 'Configure OpenAI or Gemini image access if generated visuals are required.' };
@@ -181,6 +193,9 @@ class ProductionReadinessService {
       if (requested === 'slideshow') {
         return { message: 'Local slideshow video generation is selected; no paid AI video provider is required.', details: { provider: 'slideshow' } };
       }
+      if (requested === 'comfyui') {
+        throw new Error('ComfyUI is selected but no API-format video workflow is configured. Import a workflow in dashboard settings.');
+      }
       throw new Error(`${requested} is selected but its credentials are not configured`);
     }
     if (configured.id === 'slideshow') {
@@ -189,8 +204,12 @@ class ProductionReadinessService {
     if (!includePaidVideo) {
       return {
         status: 'skipped',
-        message: `${configured.id} is configured; the paid live video probe was not requested.`,
-        remediation: 'Enable “Include paid video probe” on the next readiness run to verify the selected model.',
+        message: configured.id === 'comfyui'
+          ? 'ComfyUI workflow is configured; the local live video probe was not requested.'
+          : `${configured.id} is configured; the paid live video probe was not requested.`,
+        remediation: configured.id === 'comfyui'
+          ? 'Enable the live video probe on the next readiness run to verify local ComfyUI generation.'
+          : 'Enable “Include paid video probe” on the next readiness run to verify the selected model.',
         details: { provider: configured.id, model: configured.model }
       };
     }
@@ -211,7 +230,9 @@ class ProductionReadinessService {
     });
     const stats = await fs.stat(result.outputPath);
     return {
-      message: `${configured.id} created and returned a decodable MP4.`,
+      message: configured.id === 'comfyui'
+        ? 'ComfyUI generated and returned a decodable local MP4.'
+        : `${configured.id} created and returned a decodable MP4.`,
       details: { provider: configured.id, model: configured.model, bytes: stats.size, taskId: result.task.external_task_id }
     };
   }
@@ -282,7 +303,7 @@ class ProductionReadinessService {
     const messages = {
       text_provider: 'Run npm run walkthrough, verify the selected model, and confirm provider credits or quota.',
       image_provider: 'Verify paid image access or rely on the built-in gradient visual fallback.',
-      video_provider: 'Configure the selected provider credentials, choose local slideshow, or rerun with the paid video probe enabled.',
+      video_provider: 'Configure the selected provider credentials or ComfyUI API workflow, choose local slideshow, or enable the live video probe.',
       voice_narration: 'Configure OpenAI, Gemini TTS, ElevenLabs with a voice ID, or Azure Speech, then rerun.',
       video_assembly: 'Run npm install to restore ffmpeg-static, or configure FFMPEG_PATH to a working binary.',
       youtube_access: 'Reconnect YouTube in npm run walkthrough and ensure the Google account owns a channel.',

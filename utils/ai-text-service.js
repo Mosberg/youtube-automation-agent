@@ -1,6 +1,7 @@
 const OpenAI = require('openai');
 const Anthropic = require('@anthropic-ai/sdk');
 const { Logger } = require('./logger');
+const { LMStudioService } = require('./lm-studio-service');
 
 const GEMINI_MODELS = [
   'gemini-3.7-flash',
@@ -63,6 +64,7 @@ class AITextService {
     this.client = null;
     this.anthropic = null;
     this.gemini = null;
+    this.lmStudio = null;
     this.model = null;
     this.providerName = null;
 
@@ -79,7 +81,14 @@ class AITextService {
       if (key) return this._initGemini(key, model || credentials.gemini?.model);
     }
 
-    if (provider === 'local' && credentials.aiProvider?.baseURL) {
+    if (['local', 'lmstudio'].includes(provider) && credentials.aiProvider?.baseURL) {
+      if (provider === 'lmstudio') {
+        this.lmStudio = new LMStudioService({ baseURL: credentials.aiProvider.baseURL, apiKey });
+        this.model = model || 'local-model';
+        this.providerName = 'LM Studio';
+        this.logger.info(`LM Studio initialized (model: ${this.model})`);
+        return;
+      }
       return this._initOpenAICompatible({
         name: 'Local GGUF (OpenAI-compatible)',
         baseURL: credentials.aiProvider.baseURL,
@@ -142,6 +151,15 @@ class AITextService {
     const model = options.model || this.model;
     const maxTokens = options.maxTokens || 2048;
     const temperature = options.temperature ?? 0.7;
+
+    if (this.lmStudio) {
+      return this.lmStudio.generateText({
+        model,
+        input: prompt,
+        maxOutputTokens: maxTokens,
+        temperature
+      });
+    }
 
     if (this.gemini) {
       const config = { maxOutputTokens: maxTokens };
@@ -301,7 +319,7 @@ class AITextService {
   }
 
   isAvailable() {
-    return !!(this.client || this.anthropic || this.gemini);
+    return !!(this.client || this.anthropic || this.gemini || this.lmStudio);
   }
 }
 

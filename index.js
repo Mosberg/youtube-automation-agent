@@ -27,7 +27,12 @@ const { AudienceEngagementService } = require('./utils/audience-engagement-servi
 const { GrowthExperimentService } = require('./utils/growth-experiment-service');
 const { AITextService, PROVIDERS, GEMINI_MODELS, GEMINI_DEFAULT_MODEL } = require('./utils/ai-text-service');
 const { DiscoverabilityService } = require('./utils/discoverability-service');
-const { VoiceboxService, DEFAULT_VOICEBOX_URL } = require('./utils/voicebox-service');
+const {
+  VoiceboxService, DEFAULT_VOICEBOX_URL, VOICEBOX_LANGUAGES,
+  VOICEBOX_TTS_ENGINES, VOICEBOX_WHISPER_MODELS
+} = require('./utils/voicebox-service');
+const { LMStudioService } = require('./utils/lm-studio-service');
+const { safeModelError } = require('./utils/video-providers');
 const { version } = require('./package.json');
 const chalk = require('chalk');
 
@@ -50,6 +55,62 @@ function normalizeLocalModelBaseURL(value) {
     throw new Error('Local GGUF URL must be an HTTP(S) localhost URL without credentials, query, or fragment');
   }
   return parsed.toString().replace(/\/+$/, '');
+}
+
+const LM_STUDIO_DEFAULT_URL = 'http://127.0.0.1:1234/v1';
+
+function normalizeLMStudioModelId(value) {
+  const model = typeof value === 'string' ? value.trim() : '';
+  if (!model || model.length > 500) {
+    throw new Error('Enter an LM Studio model ID or a Hugging Face model URL (up to 500 characters)');
+  }
+  if (/^[\w.-]+(?:\/[\w.-]+)+$/.test(model)) return model;
+  let parsed;
+  try {
+    parsed = new URL(model);
+  } catch (_error) {
+    throw new Error('Enter an LM Studio model ID or an exact Hugging Face model URL');
+  }
+  if (
+    parsed.protocol !== 'https:' || parsed.hostname !== 'huggingface.co' ||
+    parsed.username || parsed.password || parsed.search || parsed.hash ||
+    parsed.pathname.split('/').filter(Boolean).length < 2
+  ) {
+    throw new Error('Downloads accept LM Studio model IDs or exact https://huggingface.co model URLs');
+  }
+  return model;
+}
+
+function validateComfyUIWorkflow(value) {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error('Paste a ComfyUI workflow exported in API format');
+  }
+  if (value.length > 1_000_000) throw new Error('ComfyUI API workflow must be smaller than 1 MB');
+  let workflow;
+  try {
+    workflow = JSON.parse(value);
+  } catch (_error) {
+    throw new Error('ComfyUI workflow must be valid JSON');
+  }
+  if (!workflow || typeof workflow !== 'object' || Array.isArray(workflow) || !Object.keys(workflow).length) {
+    throw new Error('ComfyUI workflow must be a non-empty API workflow object');
+  }
+  const nodes = Object.values(workflow);
+  if (nodes.some(node => !node || typeof node !== 'object' || typeof node.class_type !== 'string' || !node.inputs || typeof node.inputs !== 'object')) {
+    throw new Error('ComfyUI workflow must use API format with node class_type and inputs');
+  }
+  if (!nodes.some(node => JSON.stringify(node.inputs).includes('{{PROMPT}}'))) {
+    throw new Error('Add the {{PROMPT}} placeholder to the workflow text input that should receive each scene prompt');
+  }
+  return workflow;
+}
+
+function normalizeComfyUIBaseURL(value) {
+  try {
+    return normalizeLocalModelBaseURL(value);
+  } catch (_error) {
+    throw new Error('ComfyUI URL must be an HTTP(S) localhost URL without credentials, query, or fragment');
+  }
 }
 
 class YouTubeAutomationAgent {
@@ -508,6 +569,26 @@ class YouTubeAutomationAgent {
 
   setupOperatorAPI() {
     const protect = this.requireAPIKey();
+    const getLMStudioService = body => {
+      const saved = this.credentials?.credentials?.aiProvider;
+      const baseURL = typeof body?.baseURL === 'string' && body.baseURL.trim()
+        ? body.baseURL.trim()
+        : saved?.provider === 'lmstudio' ? saved.baseURL : LM_STUDIO_DEFAULT_URL;
+      const apiKey = typeof body?.apiKey === 'string' && body.apiKey.trim()
+        ? body.apiKey.trim()
+        : saved?.provider === 'lmstudio' ? saved.apiKey || '' : '';
+      let normalizedBaseURL;
+      try {
+        normalizedBaseURL = normalizeLocalModelBaseURL(baseURL);
+      } catch (error) {
+        error.status = 400;
+        throw error;
+      }
+      return new LMStudioService({
+        baseURL: normalizedBaseURL,
+        apiKey
+      });
+    };
 
     this.app.get('/api/configuration', async (_req, res) => {
       try {
@@ -516,6 +597,13 @@ class YouTubeAutomationAgent {
           local: {
             name: 'Local GGUF (llama.cpp)',
             models: credentials.aiProvider?.provider === 'local' && credentials.aiProvider?.model
+              ? [credentials.aiProvider.model] : [],
+            defaultModel: credentials.aiProvider?.model || '',
+            envKey: null
+          },
+          lmstudio: {
+            name: 'LM Studio (local)',
+            models: credentials.aiProvider?.provider === 'lmstudio' && credentials.aiProvider?.model
               ? [credentials.aiProvider.model] : [],
             defaultModel: credentials.aiProvider?.model || '',
             envKey: null
@@ -534,7 +622,7 @@ class YouTubeAutomationAgent {
           }]))
         };
         const savedProvider = credentials.aiProvider?.provider;
-        const savedProviderConfigured = savedProvider === 'local'
+        const savedProviderConfigured = ['local', 'lmstudio'].includes(savedProvider)
           ? Boolean(credentials.aiProvider?.baseURL && credentials.aiProvider?.model)
           : savedProvider === 'gemini'
             ? Boolean(credentials.aiProvider?.apiKey || credentials.gemini?.apiKey || process.env.GEMINI_API_KEY)
@@ -552,7 +640,7 @@ class YouTubeAutomationAgent {
           models: provider.models,
           defaultModel: provider.defaultModel,
           configured: Boolean(
-            (id === 'local' && credentials.aiProvider?.provider === 'local' && credentials.aiProvider?.baseURL && credentials.aiProvider?.model) ||
+            (['local', 'lmstudio'].includes(id) && credentials.aiProvider?.provider === id && credentials.aiProvider?.baseURL && credentials.aiProvider?.model) ||
             (id === 'gemini' && (credentials.aiProvider?.provider === 'gemini' && credentials.aiProvider?.apiKey || credentials.gemini?.apiKey)) ||
             (id === 'openai' && credentials.openai?.apiKey) ||
             (credentials.aiProvider?.provider === id && credentials.aiProvider?.apiKey) ||
@@ -569,8 +657,10 @@ class YouTubeAutomationAgent {
           result: {
             textProvider: {
               selected: aiProvider,
-              localBaseUrl: credentials.aiProvider?.provider === 'local' ? credentials.aiProvider.baseURL || '' : '',
-              localModel: credentials.aiProvider?.provider === 'local' ? credentials.aiProvider.model || '' : '',
+              localProvider: ['local', 'lmstudio'].includes(credentials.aiProvider?.provider)
+                ? credentials.aiProvider.provider : '',
+              localBaseUrl: ['local', 'lmstudio'].includes(credentials.aiProvider?.provider) ? credentials.aiProvider.baseURL || '' : '',
+              localModel: ['local', 'lmstudio'].includes(credentials.aiProvider?.provider) ? credentials.aiProvider.model || '' : '',
               model: credentials.aiProvider?.model || credentials.gemini?.model ||
                 (aiProvider === 'anthropic' ? process.env.ANTHROPIC_MODEL : null) ||
                 providerCatalog[aiProvider]?.defaultModel || null,
@@ -590,7 +680,10 @@ class YouTubeAutomationAgent {
                 engine: voicebox.engine || process.env.VOICEBOX_ENGINE || '',
                 modelSize: voicebox.modelSize || process.env.VOICEBOX_MODEL_SIZE || '',
                 language: voicebox.language || process.env.VOICEBOX_LANGUAGE || 'en',
-                instruct: voicebox.instruct || process.env.VOICEBOX_INSTRUCT || ''
+                instruct: voicebox.instruct || process.env.VOICEBOX_INSTRUCT || '',
+                maxChunkChars: voicebox.maxChunkChars || Number(process.env.VOICEBOX_MAX_CHUNK_CHARS) || 800,
+                crossfadeMs: voicebox.crossfadeMs ?? Number(process.env.VOICEBOX_CROSSFADE_MS || 50),
+                normalize: voicebox.normalize !== false && process.env.VOICEBOX_NORMALIZE !== 'false'
               },
               elevenLabs: {
                 voiceId: credentials.elevenLabs?.voiceId || process.env.ELEVENLABS_VOICE_ID || ''
@@ -616,6 +709,7 @@ class YouTubeAutomationAgent {
         const body = req.body || {};
         const providerCatalog = {
           local: { models: [], defaultModel: '', envKey: null },
+          lmstudio: { models: [], defaultModel: '', envKey: null },
           gemini: { models: GEMINI_MODELS, defaultModel: GEMINI_DEFAULT_MODEL, envKey: 'GEMINI_API_KEY' },
           ...Object.fromEntries(Object.entries(PROVIDERS).map(([id, provider]) => [id, provider]))
         };
@@ -634,19 +728,20 @@ class YouTubeAutomationAgent {
           : text.provider === 'openai'
             ? current.aiProvider?.provider === 'openai' ? current.aiProvider.apiKey : current.openai?.apiKey
             : current.aiProvider?.provider === text.provider ? current.aiProvider.apiKey : null;
-        if (text.provider !== 'local' && !textKey && !existingTextKey && !process.env[provider.envKey]) {
+        const isLocalProvider = ['local', 'lmstudio'].includes(text.provider);
+        if (!isLocalProvider && !textKey && !existingTextKey && !process.env[provider.envKey]) {
           return res.status(400).json({ success: false, error: `Enter an API key for ${text.provider}, or configure ${provider.envKey} in .env` });
         }
         const model = typeof text.model === 'string' ? text.model.trim() : '';
         let localBaseURL;
-        if (text.provider === 'local') {
+        if (isLocalProvider) {
           if (!model || model.length > 200) {
-            return res.status(400).json({ success: false, error: 'Enter the model name configured in the local GGUF server' });
+            return res.status(400).json({ success: false, error: `Enter the model name configured in ${text.provider === 'lmstudio' ? 'LM Studio' : 'the local GGUF server'}` });
           }
           try {
             localBaseURL = normalizeLocalModelBaseURL(text.baseURL);
           } catch (_error) {
-            return res.status(400).json({ success: false, error: 'Local GGUF URL must be an HTTP(S) localhost URL without credentials, query, or fragment' });
+            return res.status(400).json({ success: false, error: 'Local AI server URL must be an HTTP(S) localhost URL without credentials, query, or fragment' });
           }
         } else if (!provider.models?.includes(model)) {
           return res.status(400).json({ success: false, error: 'Select a supported model for the chosen text provider' });
@@ -661,6 +756,8 @@ class YouTubeAutomationAgent {
         const elevenLabsKey = typeof tts.elevenLabs?.apiKey === 'string' ? tts.elevenLabs.apiKey.trim() : '';
         const elevenLabsVoiceId = typeof tts.elevenLabs?.voiceId === 'string' ? tts.elevenLabs.voiceId.trim() : '';
         const ttsKey = typeof tts.apiKey === 'string' ? tts.apiKey.trim() : '';
+        const maxChunkChars = Number(tts.voicebox?.maxChunkChars ?? 800);
+        const crossfadeMs = Number(tts.voicebox?.crossfadeMs ?? 50);
         const credentials = { ...current };
 
         if (text.provider === 'gemini') {
@@ -674,12 +771,12 @@ class YouTubeAutomationAgent {
             model,
             ...(textKey ? { apiKey: textKey } : {})
           };
-        } else if (text.provider === 'local') {
+        } else if (isLocalProvider) {
           credentials.aiProvider = {
-            provider: 'local',
+            provider: text.provider,
             baseURL: localBaseURL,
             model,
-            ...(textKey ? { apiKey: textKey } : {})
+            ...(textKey || existingTextKey ? { apiKey: textKey || existingTextKey } : {})
           };
         } else {
           const selectedKey = textKey || existingTextKey;
@@ -692,6 +789,26 @@ class YouTubeAutomationAgent {
         if (tts.provider === 'voicebox') {
           if (!voiceboxProfileId) {
             return res.status(400).json({ success: false, error: 'Select or enter a Voicebox voice profile ID' });
+          }
+          const selectedEngine = typeof tts.voicebox?.engine === 'string' && tts.voicebox.engine.trim()
+            ? VOICEBOX_TTS_ENGINES.find(engine => engine.id === tts.voicebox.engine.trim())
+            : null;
+          if (tts.voicebox?.engine && !selectedEngine) {
+            return res.status(400).json({ success: false, error: 'Select a supported Voicebox TTS engine' });
+          }
+          const modelSize = typeof tts.voicebox?.modelSize === 'string' ? tts.voicebox.modelSize.trim() : '';
+          if (modelSize && !selectedEngine?.modelSizes.includes(modelSize)) {
+            return res.status(400).json({ success: false, error: 'Select a valid model size for the selected Voicebox engine' });
+          }
+          const language = typeof tts.voicebox?.language === 'string' ? tts.voicebox.language.trim() : '';
+          if (language && !VOICEBOX_LANGUAGES.some(([code]) => code === language)) {
+            return res.status(400).json({ success: false, error: 'Select a Voicebox-supported narration language' });
+          }
+          if (!Number.isInteger(maxChunkChars) || maxChunkChars < 100 || maxChunkChars > 5000) {
+            return res.status(400).json({ success: false, error: 'Voicebox chunk size must be between 100 and 5,000 characters' });
+          }
+          if (!Number.isInteger(crossfadeMs) || crossfadeMs < 0 || crossfadeMs > 500) {
+            return res.status(400).json({ success: false, error: 'Voicebox crossfade must be between 0 and 500 milliseconds' });
           }
           const { normalizeVoiceboxUrl } = require('./utils/voicebox-service');
           try {
@@ -723,10 +840,13 @@ class YouTubeAutomationAgent {
             ...(current.voicebox || {}),
             baseUrl: voiceboxUrl,
             profileId: voiceboxProfileId,
-            ...(typeof tts.voicebox?.engine === 'string' && tts.voicebox.engine.trim() ? { engine: tts.voicebox.engine.trim() } : {}),
-            ...(typeof tts.voicebox?.modelSize === 'string' && tts.voicebox.modelSize.trim() ? { modelSize: tts.voicebox.modelSize.trim() } : {}),
+            engine: typeof tts.voicebox?.engine === 'string' ? tts.voicebox.engine.trim() : '',
+            modelSize: typeof tts.voicebox?.modelSize === 'string' ? tts.voicebox.modelSize.trim() : '',
             ...(typeof tts.voicebox?.language === 'string' && tts.voicebox.language.trim() ? { language: tts.voicebox.language.trim() } : {}),
-            ...(typeof tts.voicebox?.instruct === 'string' && tts.voicebox.instruct.trim() ? { instruct: tts.voicebox.instruct.trim() } : {})
+            ...(typeof tts.voicebox?.instruct === 'string' && tts.voicebox.instruct.trim() ? { instruct: tts.voicebox.instruct.trim() } : {}),
+            maxChunkChars,
+            crossfadeMs,
+            normalize: tts.voicebox?.normalize !== false
           };
         }
         if (tts.provider === 'elevenlabs') {
@@ -756,7 +876,12 @@ class YouTubeAutomationAgent {
       try {
         const baseURL = typeof req.body?.baseURL === 'string' ? req.body.baseURL.trim() : '';
         const model = typeof req.body?.model === 'string' ? req.body.model.trim() : '';
-        const apiKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
+        const provider = req.body?.provider === 'lmstudio' ? 'lmstudio' : 'local';
+        const storedProvider = this.credentials?.credentials?.aiProvider;
+        const apiKey = typeof req.body?.apiKey === 'string' && req.body.apiKey.trim()
+          ? req.body.apiKey.trim()
+          : provider === 'lmstudio' && storedProvider?.provider === 'lmstudio'
+            ? storedProvider.apiKey || '' : '';
         if (!model || model.length > 200) {
           return res.status(400).json({ success: false, error: 'Enter a local HTTP(S) server URL and a model name' });
         }
@@ -768,17 +893,144 @@ class YouTubeAutomationAgent {
         }
         const service = new AITextService({
           aiProvider: {
-            provider: 'local',
+            provider,
             baseURL: normalizedBaseURL,
             model,
             ...(apiKey ? { apiKey } : {})
           }
         });
-        if (!service.client) return res.status(503).json({ success: false, error: 'Local model client could not be initialized' });
+        if (!service.isAvailable()) return res.status(503).json({ success: false, error: 'Local model client could not be initialized' });
         await service.generateText('Reply with the single word OK.', { maxTokens: 16, temperature: 0 });
-        return res.json({ success: true, result: { message: 'Local model responded successfully.' } });
+        return res.json({ success: true, result: { message: provider === 'lmstudio' ? 'LM Studio responded successfully.' : 'Local model responded successfully.' } });
       } catch (error) {
-        return res.status(502).json({ success: false, error: `Local model test failed: ${error.message}` });
+        const provider = req.body?.provider === 'lmstudio' ? 'LM Studio' : 'Local model';
+        return res.status(502).json({ success: false, error: `${provider} test failed: ${error.message}` });
+      }
+    });
+
+    this.app.post('/api/configuration/lm-studio/models', protect, async (req, res) => {
+      try {
+        const service = getLMStudioService(req.body);
+        const payload = await service.listModels();
+        if (!Array.isArray(payload?.models)) {
+          return res.status(502).json({ success: false, error: 'LM Studio returned an invalid model inventory response' });
+        }
+        const models = payload.models;
+        return res.json({
+          success: true,
+          result: {
+            models: models.map(model => ({
+              key: typeof model.key === 'string' ? model.key : '',
+              type: model.type || '',
+              displayName: model.display_name || model.key || '',
+              sizeBytes: Number.isFinite(model.size_bytes) ? model.size_bytes : null,
+              paramsString: model.params_string || null,
+              quantization: model.quantization?.name || null,
+              format: model.format || null,
+              maxContextLength: model.max_context_length || null,
+              loadedInstances: Array.isArray(model.loaded_instances)
+                ? model.loaded_instances.map(instance => ({
+                  id: instance.id,
+                  contextLength: instance.config?.context_length || null
+                })) : []
+            }))
+          }
+        });
+      } catch (error) {
+        return res.status(error.status || 502).json({ success: false, error: `Could not list LM Studio models: ${error.message}` });
+      }
+    });
+
+    this.app.post('/api/configuration/lm-studio/models/load', protect, async (req, res) => {
+      try {
+        const model = typeof req.body?.model === 'string' ? req.body.model.trim() : '';
+        if (!model || model.length > 200) {
+          return res.status(400).json({ success: false, error: 'Select an LM Studio model to load' });
+        }
+        const options = { echo_load_config: true };
+        if (req.body?.contextLength !== undefined && req.body.contextLength !== '') {
+          const contextLength = Number(req.body.contextLength);
+          if (!Number.isInteger(contextLength) || contextLength < 512 || contextLength > 262144) {
+            return res.status(400).json({ success: false, error: 'Context length must be an integer from 512 to 262,144' });
+          }
+          options.context_length = contextLength;
+        }
+        for (const [input, key, label, maximum] of [
+          ['evalBatchSize', 'eval_batch_size', 'Evaluation batch size', 262144],
+          ['numExperts', 'num_experts', 'MoE expert count', 1024]
+        ]) {
+          if (req.body?.[input] === undefined || req.body[input] === '') continue;
+          const value = Number(req.body[input]);
+          if (!Number.isInteger(value) || value < 1 || value > maximum) {
+            return res.status(400).json({ success: false, error: `${label} must be an integer from 1 to ${maximum.toLocaleString('en-US')}` });
+          }
+          options[key] = value;
+        }
+        for (const [input, key] of [
+          ['flashAttention', 'flash_attention'],
+          ['offloadKVCacheToGPU', 'offload_kv_cache_to_gpu']
+        ]) {
+          if (typeof req.body?.[input] !== 'boolean') {
+            return res.status(400).json({ success: false, error: `Choose whether ${key === 'flash_attention' ? 'Flash Attention' : 'GPU KV cache offload'} is enabled` });
+          }
+          options[key] = req.body[input];
+        }
+        const result = await getLMStudioService(req.body).loadModel(model, options);
+        return res.json({ success: true, result });
+      } catch (error) {
+        return res.status(error.status || 502).json({ success: false, error: `Could not load LM Studio model: ${error.message}` });
+      }
+    });
+
+    this.app.post('/api/configuration/lm-studio/models/unload', protect, async (req, res) => {
+      try {
+        const instanceId = typeof req.body?.instanceId === 'string' ? req.body.instanceId.trim() : '';
+        if (!instanceId || instanceId.length > 200) {
+          return res.status(400).json({ success: false, error: 'Select a loaded LM Studio model instance to unload' });
+        }
+        const result = await getLMStudioService(req.body).unloadModel(instanceId);
+        return res.json({ success: true, result });
+      } catch (error) {
+        return res.status(error.status || 502).json({ success: false, error: `Could not unload LM Studio model: ${error.message}` });
+      }
+    });
+
+    this.app.post('/api/configuration/lm-studio/models/download', protect, async (req, res) => {
+      try {
+        let model;
+        try {
+          model = normalizeLMStudioModelId(req.body?.model);
+        } catch (error) {
+          return res.status(400).json({ success: false, error: error.message });
+        }
+        const quantization = typeof req.body?.quantization === 'string' ? req.body.quantization.trim() : '';
+        if (quantization && !model.startsWith('https://huggingface.co/')) {
+          return res.status(400).json({ success: false, error: 'Quantization is supported only when downloading from a Hugging Face model URL' });
+        }
+        if (quantization && !/^[\w.-]{1,40}$/.test(quantization)) {
+          return res.status(400).json({ success: false, error: 'Quantization must be a short model quantization ID (for example Q4_K_M)' });
+        }
+        const result = await getLMStudioService(req.body).downloadModel(model, quantization);
+        if (result.status === 'failed') {
+          return res.status(502).json({ success: false, error: result.error || 'LM Studio reported that the model download failed', result });
+        }
+        const accepted = ['downloading', 'paused'].includes(result.status) && result.job_id;
+        return res.status(accepted ? 202 : 200).json({ success: true, result });
+      } catch (error) {
+        return res.status(error.status || 502).json({ success: false, error: `Could not start LM Studio model download: ${error.message}` });
+      }
+    });
+
+    this.app.post('/api/configuration/lm-studio/models/download-status', protect, async (req, res) => {
+      try {
+        const jobId = typeof req.body?.jobId === 'string' ? req.body.jobId.trim() : '';
+        if (!/^[\w-]{1,128}$/.test(jobId)) {
+          return res.status(400).json({ success: false, error: 'Enter a valid LM Studio download job ID' });
+        }
+        const result = await getLMStudioService(req.body).getDownloadStatus(jobId);
+        return res.json({ success: true, result });
+      } catch (error) {
+        return res.status(error.status || 502).json({ success: false, error: `Could not read LM Studio download status: ${error.message}` });
       }
     });
 
@@ -800,6 +1052,213 @@ class YouTubeAutomationAgent {
         });
       } catch (error) {
         return res.status(502).json({ success: false, error: error.message });
+      }
+    });
+
+    this.app.get('/api/configuration/voicebox/catalog', protect, async (req, res) => {
+      try {
+        const baseUrl = req.query.baseUrl || this.credentials?.credentials?.voicebox?.baseUrl ||
+          process.env.VOICEBOX_BASE_URL || DEFAULT_VOICEBOX_URL;
+        const service = new VoiceboxService({ baseUrl });
+        const [health, profiles, modelStatuses, kokoroVoices, qwenPresetVoices] = await Promise.all([
+          service.getHealth(),
+          service.listProfiles(),
+          service.getModelStatus(),
+          service.listPresetVoices('kokoro'),
+          service.listPresetVoices('qwen_custom_voice')
+        ]);
+        const statuses = new Map(modelStatuses.map(model => [model.model_name, model]));
+        return res.json({
+          success: true,
+          result: {
+            health: {
+              gpuAvailable: health.gpu_available,
+              gpuType: health.gpu_type,
+              vramUsedMb: health.vram_used_mb,
+              backendType: health.backend_type
+            },
+            profiles: profiles.map(profile => ({
+              id: profile.id,
+              name: profile.name,
+              language: profile.language,
+              voiceType: profile.voice_type || 'cloned',
+              presetEngine: profile.preset_engine || null,
+              presetVoiceId: profile.preset_voice_id || null,
+              defaultEngine: profile.default_engine || null,
+              sampleCount: profile.sample_count || 0
+            })),
+            engines: VOICEBOX_TTS_ENGINES.map(engine => ({
+              ...engine,
+              models: engine.modelIds.map((id, index) => ({
+                id,
+                name: statuses.get(id)?.display_name || id,
+                modelSize: engine.modelSizes[index] || null,
+                downloaded: Boolean(statuses.get(id)?.downloaded),
+                downloading: Boolean(statuses.get(id)?.downloading),
+                loaded: Boolean(statuses.get(id)?.loaded),
+                sizeMb: statuses.get(id)?.size_mb || null
+              }))
+            })),
+            whisperModels: VOICEBOX_WHISPER_MODELS.map(model => ({
+              ...model,
+              downloaded: Boolean(statuses.get(model.id)?.downloaded),
+              downloading: Boolean(statuses.get(model.id)?.downloading),
+              loaded: Boolean(statuses.get(model.id)?.loaded),
+              sizeMb: statuses.get(model.id)?.size_mb || null
+            })),
+            languages: VOICEBOX_LANGUAGES,
+            presets: {
+              kokoro: kokoroVoices,
+              qwen_custom_voice: qwenPresetVoices
+            }
+          }
+        });
+      } catch (error) {
+        return res.status(502).json({ success: false, error: error.message });
+      }
+    });
+
+    this.app.post('/api/configuration/voicebox/profiles/preset', protect, async (req, res) => {
+      try {
+        const { engine, voiceId } = req.body || {};
+        const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+        const selectedEngine = VOICEBOX_TTS_ENGINES.find(item => item.id === engine && item.profileType === 'preset');
+        if (!selectedEngine || !name || name.length > 100 || typeof voiceId !== 'string') {
+          return res.status(400).json({ success: false, error: 'Choose a preset engine and voice, and enter a profile name (up to 100 characters).' });
+        }
+        const baseUrl = req.body?.baseUrl || this.credentials?.credentials?.voicebox?.baseUrl ||
+          process.env.VOICEBOX_BASE_URL || DEFAULT_VOICEBOX_URL;
+        const service = new VoiceboxService({ baseUrl });
+        const voices = await service.listPresetVoices(engine);
+        const voice = voices.find(item => item.voice_id === voiceId);
+        if (!voice) return res.status(400).json({ success: false, error: 'That preset voice is not available in Voicebox.' });
+        const result = await service.createPresetProfile({
+          name,
+          language: voice.language || 'en',
+          voice_type: 'preset',
+          preset_engine: engine,
+          preset_voice_id: voiceId,
+          default_engine: engine
+        });
+        return res.status(201).json({ success: true, result });
+      } catch (error) {
+        return res.status(502).json({ success: false, error: error.message });
+      }
+    });
+
+    this.app.post('/api/configuration/voicebox/models/:modelName/:action', protect, async (req, res) => {
+      try {
+        const { modelName, action } = req.params;
+        if (!['load', 'unload', 'download'].includes(action)) {
+          return res.status(404).json({ success: false, error: 'Unsupported model action' });
+        }
+        const allowedModels = [
+          ...VOICEBOX_TTS_ENGINES.flatMap(engine => engine.modelIds),
+          ...VOICEBOX_WHISPER_MODELS.map(model => model.id)
+        ];
+        if (!allowedModels.includes(modelName)) {
+          return res.status(400).json({ success: false, error: 'Unknown Voicebox model' });
+        }
+        const baseUrl = req.body?.baseUrl || this.credentials?.credentials?.voicebox?.baseUrl ||
+          process.env.VOICEBOX_BASE_URL || DEFAULT_VOICEBOX_URL;
+        const service = new VoiceboxService({ baseUrl });
+        if (action === 'load') {
+          const status = await service.getModelStatus();
+          const model = status.find(item => item.model_name === modelName);
+          if (!model?.downloaded) {
+            return res.status(409).json({ success: false, error: `${modelName} is not downloaded in Voicebox yet. Download it in Voicebox before loading.` });
+          }
+          const result = await service.loadModel(modelName);
+          return res.json({ success: true, result });
+        }
+        if (action === 'download') {
+          const result = await service.downloadModel(modelName);
+          return res.status(202).json({ success: true, result });
+        }
+        const result = await service.unloadModel(modelName);
+        return res.json({ success: true, result });
+      } catch (error) {
+        return res.status(502).json({ success: false, error: error.message });
+      }
+    });
+
+    this.app.post('/api/configuration/voicebox/preview', protect, async (req, res) => {
+      try {
+        const { profileId, engine, text, language, modelSize, instruct } = req.body || {};
+        const cleanText = typeof text === 'string' ? text.trim() : '';
+        if (!cleanText || cleanText.length > 2000) {
+          return res.status(400).json({ success: false, error: 'Enter sample text of up to 2,000 characters.' });
+        }
+        const baseUrl = req.body?.baseUrl || this.credentials?.credentials?.voicebox?.baseUrl ||
+          process.env.VOICEBOX_BASE_URL || DEFAULT_VOICEBOX_URL;
+        const service = new VoiceboxService({ baseUrl });
+        const profiles = await service.listProfiles();
+        const profile = profiles.find(item => item.id === profileId);
+        if (!profile) return res.status(400).json({ success: false, error: 'Select a profile from the connected Voicebox server.' });
+        const selectedEngineId = engine || profile.default_engine || profile.preset_engine || 'qwen';
+        const selectedEngine = VOICEBOX_TTS_ENGINES.find(item => item.id === selectedEngineId);
+        if (!selectedEngine) return res.status(400).json({ success: false, error: 'Select a supported Voicebox TTS engine.' });
+        if (selectedEngine.modelSizes.length && !selectedEngine.modelSizes.includes(modelSize)) {
+          return res.status(400).json({ success: false, error: 'Select a supported size for this Voicebox engine.' });
+        }
+        if (language && !selectedEngine.languages.includes(language)) {
+          return res.status(400).json({ success: false, error: `${selectedEngine.name} does not support ${language}.` });
+        }
+        const profileType = profile.voice_type || 'cloned';
+        const profileMatches = profileType === selectedEngine.profileType &&
+          (profileType !== 'preset' || profile.preset_engine === selectedEngineId);
+        if (!profileMatches) {
+          return res.status(400).json({ success: false, error: `${selectedEngine.name} requires a ${selectedEngine.profileType} profile${selectedEngine.profileType === 'preset' ? ` for ${selectedEngineId}` : ''}.` });
+        }
+        const audio = await service.generateSpeech({
+          profile_id: profileId,
+          text: cleanText,
+          engine: selectedEngineId,
+          language: language || profile.language || 'en',
+          ...(modelSize ? { model_size: modelSize } : {}),
+          ...(typeof instruct === 'string' && instruct.trim() ? { instruct: instruct.trim().slice(0, 500) } : {}),
+          max_chunk_chars: Number(req.body?.maxChunkChars) || 800,
+          crossfade_ms: Number(req.body?.crossfadeMs) || 0,
+          normalize: true
+        });
+        res.setHeader('Content-Type', 'audio/wav');
+        res.setHeader('Content-Length', audio.length);
+        return res.send(audio);
+      } catch (error) {
+        return res.status(502).json({ success: false, error: error.message });
+      }
+    });
+
+    this.app.post(
+      '/api/configuration/voicebox/transcribe',
+      protect,
+      express.raw({ type: ['audio/*', 'application/octet-stream'], limit: '200mb' }),
+      async (req, res) => {
+      try {
+        const model = typeof req.query.model === 'string' ? req.query.model : 'turbo';
+        const language = typeof req.query.language === 'string' ? req.query.language : '';
+        const selectedModel = VOICEBOX_WHISPER_MODELS.find(item => item.value === model);
+        if (!selectedModel) {
+          return res.status(400).json({ success: false, error: 'Select a supported Whisper model.' });
+        }
+        if (language && !VOICEBOX_LANGUAGES.some(([code]) => code === language)) {
+          return res.status(400).json({ success: false, error: 'Select a supported transcription language.' });
+        }
+        if (!Buffer.isBuffer(req.body) || !req.body.length) {
+          return res.status(400).json({ success: false, error: 'Upload a non-empty audio file.' });
+        }
+        const baseUrl = req.query.baseUrl || this.credentials?.credentials?.voicebox?.baseUrl ||
+          process.env.VOICEBOX_BASE_URL || DEFAULT_VOICEBOX_URL;
+        const service = new VoiceboxService({ baseUrl });
+        const fileName = typeof req.query.filename === 'string' ? path.basename(req.query.filename) : 'voicebox-upload.wav';
+        const result = await service.transcribeAudio(req.body, fileName, {
+          contentType: req.headers['content-type'] || 'application/octet-stream',
+          model,
+          language: language || undefined
+        });
+        return res.json({ success: true, result });
+      } catch (error) {
+        return res.status(error.type === 'entity.too.large' ? 413 : 502).json({ success: false, error: error.message });
       }
     });
 
@@ -883,6 +1342,7 @@ class YouTubeAutomationAgent {
             : Promise.resolve({ experiments: [], candidates: [], activeCount: 0, awaitingDecisionCount: 0, evidencePolicy: 'Finish setup to create a controlled growth experiment.' })
         ]);
         if (this.telemetry) void this.telemetry.sync(activation);
+        await this.agents.production?.aiVideoGenerator?.mediaGeneration?.settings();
         res.json({
           stats, jobs, pipeline, schedule, events, notifications, profile, settings, ideas, analytics, learning, activation,
           channelStrategy, operatorRuns, readiness, engagement, experiments,
@@ -1601,32 +2061,123 @@ class YouTubeAutomationAgent {
     });
 
     this.app.put('/api/settings', protect, async (req, res) => {
+      const stored = await this.db.getAllSettings();
+      const provider = req.body?.video_provider;
+      if (provider !== undefined) {
+        const supported = ['slideshow', 'auto', 'seedance', 'minimax_h3', 'google_omni', 'kling', 'wan', 'comfyui'];
+        if (!supported.includes(provider)) return res.status(400).json({ error: 'Unsupported video provider' });
+      }
+      let comfyBaseURL;
+      if (req.body?.comfyui_base_url !== undefined) {
+        try {
+          comfyBaseURL = normalizeComfyUIBaseURL(req.body.comfyui_base_url);
+        } catch (error) {
+          return res.status(400).json({ error: error.message });
+        }
+      }
+      let comfyWorkflow;
+      const postedWorkflow = typeof req.body?.comfyui_workflow === 'string' ? req.body.comfyui_workflow.trim() : '';
+      const workflowInput = postedWorkflow || stored.comfyui_workflow;
+      if (postedWorkflow || provider === 'comfyui') {
+        try {
+          comfyWorkflow = validateComfyUIWorkflow(
+            typeof workflowInput === 'string' ? workflowInput : JSON.stringify(workflowInput)
+          );
+        } catch (error) {
+          return res.status(400).json({ error: error.message });
+        }
+      }
+      let comfyFrameRate;
+      if (req.body?.comfyui_frame_rate !== undefined) {
+        comfyFrameRate = Number(req.body.comfyui_frame_rate);
+        if (!Number.isInteger(comfyFrameRate) || comfyFrameRate < 1 || comfyFrameRate > 60) {
+          return res.status(400).json({ error: 'ComfyUI frame rate must be an integer between 1 and 60' });
+        }
+      }
+      const comfyApiKey = typeof req.body?.comfyui_api_key === 'string' ? req.body.comfyui_api_key.trim() : '';
+      if (comfyApiKey.length > 500) return res.status(400).json({ error: 'ComfyUI API token must be 500 characters or fewer' });
+      if (comfyApiKey && !this.credentials) return res.status(503).json({ error: 'Credential storage is not initialized' });
+      const mode = req.body?.video_generation_mode;
+      if (mode !== undefined && !['hybrid', 'slideshow'].includes(mode)) {
+        return res.status(400).json({ error: 'Unsupported video generation mode' });
+      }
+      let clipDuration;
+      if (req.body?.video_clip_duration !== undefined) {
+        clipDuration = Number(req.body.video_clip_duration);
+        if (!Number.isInteger(clipDuration) || clipDuration < 3 || clipDuration > 30) {
+          return res.status(400).json({ error: 'Clip duration must be between 3 and 30 seconds' });
+        }
+      }
+      let maxGeneratedSeconds;
+      if (req.body?.video_max_generated_seconds !== undefined) {
+        maxGeneratedSeconds = Number(req.body.video_max_generated_seconds);
+        if (!Number.isInteger(maxGeneratedSeconds) || maxGeneratedSeconds < 0 || maxGeneratedSeconds > 600) {
+          return res.status(400).json({ error: 'Generated seconds cap must be between 0 and 600' });
+        }
+      }
       const allowed = ['approval_required', 'notification_enabled', 'channel_timezone', 'max_daily_posts', 'content_buffer_days'];
       for (const key of allowed) {
         if (req.body?.[key] !== undefined) await this.db.setSetting(key, String(req.body[key]));
       }
-      const provider = req.body?.video_provider;
       if (provider !== undefined) {
-        const supported = ['slideshow', 'auto', 'seedance', 'minimax_h3', 'google_omni', 'kling', 'wan'];
-        if (!supported.includes(provider)) return res.status(400).json({ error: 'Unsupported video provider' });
         await this.db.setSetting('video_provider', provider);
       }
-      const mode = req.body?.video_generation_mode;
+      if (comfyBaseURL) await this.db.setSetting('comfyui_base_url', comfyBaseURL);
+      if (comfyWorkflow) await this.db.setSetting('comfyui_workflow', JSON.stringify(comfyWorkflow));
+      if (comfyFrameRate !== undefined) await this.db.setSetting('comfyui_frame_rate', String(comfyFrameRate));
+      if (comfyApiKey) {
+        this.credentials.credentials = {
+          ...(this.credentials.credentials || {}),
+          comfyui: { ...(this.credentials.credentials?.comfyui || {}), apiKey: comfyApiKey }
+        };
+        await this.credentials.saveCredentials();
+      }
       if (mode !== undefined) {
-        if (!['hybrid', 'slideshow'].includes(mode)) return res.status(400).json({ error: 'Unsupported video generation mode' });
         await this.db.setSetting('video_generation_mode', mode);
       }
-      if (req.body?.video_clip_duration !== undefined) {
-        const value = Number(req.body.video_clip_duration);
-        if (!Number.isInteger(value) || value < 3 || value > 30) return res.status(400).json({ error: 'Clip duration must be between 3 and 30 seconds' });
-        await this.db.setSetting('video_clip_duration', String(value));
-      }
-      if (req.body?.video_max_generated_seconds !== undefined) {
-        const value = Number(req.body.video_max_generated_seconds);
-        if (!Number.isInteger(value) || value < 0 || value > 600) return res.status(400).json({ error: 'Generated seconds cap must be between 0 and 600' });
-        await this.db.setSetting('video_max_generated_seconds', String(value));
-      }
+      if (clipDuration !== undefined) await this.db.setSetting('video_clip_duration', String(clipDuration));
+      if (maxGeneratedSeconds !== undefined) await this.db.setSetting('video_max_generated_seconds', String(maxGeneratedSeconds));
       return res.json({ success: true, result: await this.db.getAllSettings() });
+    });
+
+    this.app.post('/api/video/comfyui/check', protect, async (req, res) => {
+      const stored = await this.db.getAllSettings();
+      let baseURL;
+      let workflow;
+      try {
+        baseURL = normalizeComfyUIBaseURL(req.body?.baseURL || stored.comfyui_base_url || process.env.COMFYUI_BASE_URL || 'http://127.0.0.1:8188');
+        const workflowValue = req.body?.workflow ?? stored.comfyui_workflow;
+        workflow = validateComfyUIWorkflow(typeof workflowValue === 'string' ? workflowValue : JSON.stringify(workflowValue));
+      } catch (error) {
+        return res.status(400).json({ success: false, error: error.message });
+      }
+      const provider = this.agents.production?.aiVideoGenerator?.mediaGeneration?.registry.get('comfyui');
+      if (!provider) return res.status(503).json({ success: false, error: 'Video generation service is not initialized' });
+      const apiKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
+      if (apiKey.length > 500) return res.status(400).json({ success: false, error: 'ComfyUI API token must be 500 characters or fewer' });
+      const previousConfig = {
+        baseURL: provider.baseURL, workflow: provider.workflow,
+        frameRate: provider.frameRate, apiKey: provider.apiKey
+      };
+      provider.configure({
+        baseURL, workflow,
+        apiKey: apiKey || this.credentials?.credentials?.comfyui?.apiKey || process.env.COMFYUI_API_KEY || ''
+      });
+      try {
+        const system = await provider.checkConnection();
+        return res.json({
+          success: true,
+          result: {
+            message: 'ComfyUI is reachable and the API workflow is valid.',
+            workflowReady: true,
+            system: { devices: Array.isArray(system.devices) ? system.devices.length : undefined }
+          }
+        });
+      } catch (error) {
+        return res.status(502).json({ success: false, error: `Could not connect to ComfyUI: ${safeModelError(error)}` });
+      } finally {
+        provider.configure(previousConfig);
+      }
     });
 
     this.app.post('/api/notifications/:notificationId/read', protect, async (req, res) => {

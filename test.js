@@ -273,9 +273,11 @@ class SystemTest {
   async testOperatorWorkflowAPI() {
     const { YouTubeAutomationAgent } = require('./index');
     const { OperatorService } = require('./utils/operator-service');
+    const http = require('http');
     const db = new Database();
     await db.initialize();
     let server;
+    let lmStudioServer;
     let job;
     let learningRecommendation;
     const savedTTSProvider = process.env.TTS_PROVIDER;
@@ -323,6 +325,7 @@ class SystemTest {
         const running = agent.app.listen(0, () => resolve(running));
       });
       const { port } = server.address();
+      const apiKeyHeaders = process.env.API_KEY ? { 'x-api-key': process.env.API_KEY } : {};
       const response = await fetch(`http://127.0.0.1:${port}/api/dashboard`);
       const dashboard = await response.json();
       if (
@@ -348,7 +351,7 @@ class SystemTest {
       }
       const saveConfiguration = await fetch(`http://127.0.0.1:${port}/api/configuration`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { ...apiKeyHeaders, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           textProvider: { provider: 'anthropic', model: 'claude-sonnet-5-5', apiKey: 'anthropic-ui-test-secret' },
           tts: { provider: 'auto' }
@@ -370,7 +373,7 @@ class SystemTest {
       }
       const rejectRemoteGGUF = await fetch(`http://127.0.0.1:${port}/api/configuration/local-model/check`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { ...apiKeyHeaders, 'Content-Type': 'application/json' },
         body: JSON.stringify({ baseURL: 'http://example.com/v1', model: 'local-model' })
       });
       if (rejectRemoteGGUF.status !== 400) {
@@ -378,7 +381,7 @@ class SystemTest {
       }
       const saveLocalGGUF = await fetch(`http://127.0.0.1:${port}/api/configuration`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { ...apiKeyHeaders, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           textProvider: {
             provider: 'local', baseURL: 'http://127.0.0.1:8080/v1',
@@ -394,9 +397,204 @@ class SystemTest {
       ) {
         throw new Error('GUI did not persist a local GGUF model without requiring a cloud API key');
       }
+      let loaded = false;
+      let nativeChatRequest = null;
+      lmStudioServer = http.createServer(async (request, response) => {
+        const chunks = [];
+        for await (const chunk of request) chunks.push(chunk);
+        const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
+        const json = value => {
+          response.writeHead(200, { 'Content-Type': 'application/json' });
+          response.end(JSON.stringify(value));
+        };
+        if (request.headers.authorization !== 'Bearer lm-studio-secret') {
+          response.writeHead(401);
+          response.end(JSON.stringify({ error: 'Unauthorized' }));
+          return;
+        }
+        if (request.method === 'GET' && request.url === '/api/v1/models') {
+          json({ models: [
+            {
+              key: 'qwen3-8b-instruct',
+              type: 'llm',
+              display_name: 'Qwen 3 8B Instruct',
+              size_bytes: 8000000000,
+              params_string: '8B',
+              quantization: { name: 'Q4_K_M' },
+              format: 'gguf',
+              max_context_length: 32768,
+              loaded_instances: loaded ? [{ id: 'instance-qwen3', config: { context_length: 8192 } }] : []
+            },
+            { key: 'nomic-embed-text', type: 'embedding', display_name: 'Nomic Embed Text', loaded_instances: [] }
+          ] });
+          return;
+        }
+        if (request.method === 'POST' && request.url === '/api/v1/chat') {
+          nativeChatRequest = body;
+          json({ model_instance_id: 'instance-qwen3', output: [{ type: 'message', content: 'OK' }] });
+          return;
+        }
+        if (request.method === 'POST' && request.url === '/api/v1/models/load') {
+          loaded = true;
+          json({ type: 'llm', instance_id: 'instance-qwen3', status: 'loaded', load_config: body });
+          return;
+        }
+        if (request.method === 'POST' && request.url === '/api/v1/models/unload') {
+          loaded = false;
+          json({ instance_id: body.instance_id });
+          return;
+        }
+        if (request.method === 'POST' && request.url === '/api/v1/models/download') {
+          json({ job_id: 'job_lmstudio_123', status: 'downloading', total_size_bytes: 1000, started_at: '2026-10-15T00:00:00Z' });
+          return;
+        }
+        if (request.method === 'GET' && request.url === '/api/v1/models/download/status/job_lmstudio_123') {
+          json({ job_id: 'job_lmstudio_123', status: 'downloading', total_size_bytes: 1000, downloaded_bytes: 450 });
+          return;
+        }
+        response.writeHead(404);
+        response.end();
+      });
+      await new Promise(resolve => lmStudioServer.listen(0, '127.0.0.1', resolve));
+      const lmStudioBaseURL = `http://127.0.0.1:${lmStudioServer.address().port}/v1`;
+      const listLMStudioModels = await fetch(`http://127.0.0.1:${port}/api/configuration/lm-studio/models`, {
+        method: 'POST',
+        headers: { ...apiKeyHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseURL: lmStudioBaseURL, apiKey: 'lm-studio-secret' })
+      });
+      const lmStudioModels = await listLMStudioModels.json();
+      if (
+        !listLMStudioModels.ok ||
+        lmStudioModels.result?.models?.map(model => model.key).join(',') !== 'qwen3-8b-instruct,nomic-embed-text' ||
+        lmStudioModels.result.models[0]?.loadedInstances.length !== 0
+      ) {
+        throw new Error('Dashboard did not discover installed and loaded-state model data from the LM Studio native API');
+      }
+      const saveLMStudio = await fetch(`http://127.0.0.1:${port}/api/configuration`, {
+        method: 'PUT',
+        headers: { ...apiKeyHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          textProvider: {
+            provider: 'lmstudio', baseURL: lmStudioBaseURL,
+            model: 'qwen3-8b-instruct', apiKey: 'lm-studio-secret'
+          },
+          tts: { provider: 'auto' }
+        })
+      });
+      if (
+        !saveLMStudio.ok ||
+        agent.credentials.credentials.aiProvider?.provider !== 'lmstudio' ||
+        agent.credentials.credentials.aiProvider?.baseURL !== lmStudioBaseURL ||
+        agent.credentials.credentials.aiProvider?.model !== 'qwen3-8b-instruct'
+      ) {
+        throw new Error('GUI did not persist an LM Studio provider without requiring a cloud API key');
+      }
+      const testLMStudio = await fetch(`http://127.0.0.1:${port}/api/configuration/local-model/check`, {
+        method: 'POST',
+        headers: { ...apiKeyHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'lmstudio', baseURL: lmStudioBaseURL,
+          model: 'qwen3-8b-instruct'
+        })
+      });
+      const lmStudioTestResult = await testLMStudio.json();
+      if (!testLMStudio.ok || !/LM Studio responded/.test(lmStudioTestResult.result?.message || '')) {
+        throw new Error('Dashboard could not verify LM Studio native chat');
+      }
+      if (
+        nativeChatRequest?.model !== 'qwen3-8b-instruct' ||
+        nativeChatRequest?.input !== 'Reply with the single word OK.' ||
+        nativeChatRequest?.store !== false ||
+        nativeChatRequest?.max_output_tokens !== 16
+      ) {
+        throw new Error('LM Studio text generation did not use the native v1 chat request contract');
+      }
+      const loadLMStudioModel = await fetch(`http://127.0.0.1:${port}/api/configuration/lm-studio/models/load`, {
+        method: 'POST',
+        headers: { ...apiKeyHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          baseURL: lmStudioBaseURL, model: 'qwen3-8b-instruct',
+          contextLength: 8192, evalBatchSize: 512, numExperts: 4,
+          flashAttention: true, offloadKVCacheToGPU: false
+        })
+      });
+      const loadedModel = await loadLMStudioModel.json();
+      if (
+        !loadLMStudioModel.ok ||
+        loadedModel.result?.instance_id !== 'instance-qwen3' ||
+        loadedModel.result?.load_config?.context_length !== 8192 ||
+        loadedModel.result?.load_config?.eval_batch_size !== 512 ||
+        loadedModel.result?.load_config?.num_experts !== 4 ||
+        loadedModel.result?.load_config?.flash_attention !== true ||
+        loadedModel.result?.load_config?.offload_kv_cache_to_gpu !== false
+      ) {
+        throw new Error('LM Studio load endpoint did not forward validated model load settings');
+      }
+      const listedLoadedModel = await fetch(`http://127.0.0.1:${port}/api/configuration/lm-studio/models`, {
+        method: 'POST',
+        headers: { ...apiKeyHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseURL: lmStudioBaseURL })
+      });
+      const loadedCatalog = await listedLoadedModel.json();
+      if (loadedCatalog.result?.models[0]?.loadedInstances[0]?.id !== 'instance-qwen3') {
+        throw new Error('LM Studio inventory did not expose active model instances for unloading');
+      }
+      const unloadLMStudioModel = await fetch(`http://127.0.0.1:${port}/api/configuration/lm-studio/models/unload`, {
+        method: 'POST',
+        headers: { ...apiKeyHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseURL: lmStudioBaseURL, instanceId: 'instance-qwen3' })
+      });
+      if (!unloadLMStudioModel.ok || loaded) {
+        throw new Error('LM Studio unload endpoint did not unload the selected model instance');
+      }
+      const startLMStudioDownload = await fetch(`http://127.0.0.1:${port}/api/configuration/lm-studio/models/download`, {
+        method: 'POST',
+        headers: { ...apiKeyHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          baseURL: lmStudioBaseURL, model: 'https://huggingface.co/lmstudio-community/test-GGUF',
+          quantization: 'Q4_K_M'
+        })
+      });
+      const downloadStarted = await startLMStudioDownload.json();
+      if (
+        startLMStudioDownload.status !== 202 ||
+        downloadStarted.result?.job_id !== 'job_lmstudio_123'
+      ) {
+        throw new Error('LM Studio download endpoint did not return its download job');
+      }
+      const downloadProgress = await fetch(`http://127.0.0.1:${port}/api/configuration/lm-studio/models/download-status`, {
+        method: 'POST',
+        headers: { ...apiKeyHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseURL: lmStudioBaseURL, jobId: 'job_lmstudio_123' })
+      });
+      const progress = await downloadProgress.json();
+      if (!downloadProgress.ok || progress.result?.downloaded_bytes !== 450) {
+        throw new Error('LM Studio download status endpoint did not return progress');
+      }
+      const rejectInvalidLMStudioDownload = await fetch(`http://127.0.0.1:${port}/api/configuration/lm-studio/models/download`, {
+        method: 'POST',
+        headers: { ...apiKeyHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'https://example.com/attacker/model' })
+      });
+      if (rejectInvalidLMStudioDownload.status !== 400) {
+        throw new Error('LM Studio model downloads must accept only model IDs or Hugging Face model URLs');
+      }
+      const hideLMStudioSecret = await fetch(`http://127.0.0.1:${port}/api/configuration`);
+      const configurationAfterLMStudio = await hideLMStudioSecret.json();
+      if (JSON.stringify(configurationAfterLMStudio).includes('lm-studio-secret')) {
+        throw new Error('Configuration API exposed the saved LM Studio API token');
+      }
+      const rejectRemoteLMStudio = await fetch(`http://127.0.0.1:${port}/api/configuration/lm-studio/models`, {
+        method: 'POST',
+        headers: { ...apiKeyHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseURL: 'http://example.com/v1' })
+      });
+      if (rejectRemoteLMStudio.status !== 400) {
+        throw new Error('LM Studio model discovery must reject non-local server URLs');
+      }
       const unavailableStart = await fetch(`http://127.0.0.1:${port}/api/operator/start`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { ...apiKeyHeaders, 'Content-Type': 'application/json' },
         body: '{}'
       });
       if (unavailableStart.status !== 503) {
@@ -414,7 +612,7 @@ class SystemTest {
       });
       const approveLearning = await fetch(
         `http://127.0.0.1:${port}/api/learning/recommendations/${learningRecommendation.id}/approve`,
-        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }
+        { method: 'POST', headers: { ...apiKeyHeaders, 'Content-Type': 'application/json' }, body: '{}' }
       );
       const approvedLearning = await approveLearning.json();
       if (!approveLearning.ok || approvedLearning.result?.status !== 'approved') {
@@ -422,6 +620,7 @@ class SystemTest {
       }
     } finally {
       if (server) await new Promise(resolve => server.close(resolve));
+      if (lmStudioServer) await new Promise(resolve => lmStudioServer.close(resolve));
       if (savedTTSProvider === undefined) delete process.env.TTS_PROVIDER;
       else process.env.TTS_PROVIDER = savedTTSProvider;
       if (job) await db.executeQuery('DELETE FROM generation_jobs WHERE id = ?', [job.id]);
@@ -1110,8 +1309,15 @@ class SystemTest {
     const { MediaGenerationService } = require('./utils/media-generation-service');
     const {
       VideoProvider, VideoProviderRegistry, SeedanceProvider, MiniMaxH3Provider,
-      GoogleOmniProvider, KlingProvider, WanProvider
+      GoogleOmniProvider, KlingProvider, WanProvider, ComfyUIProvider
     } = require('./utils/video-providers');
+    const mediaEnv = Object.fromEntries([
+      'VIDEO_PROVIDER', 'VIDEO_PROVIDER_ORDER', 'VIDEO_GENERATION_MODE', 'VIDEO_MAX_GENERATED_SECONDS'
+    ].map(key => [key, process.env[key]]));
+    process.env.VIDEO_PROVIDER = 'comfyui';
+    delete process.env.VIDEO_PROVIDER_ORDER;
+    delete process.env.VIDEO_GENERATION_MODE;
+    delete process.env.VIDEO_MAX_GENERATED_SECONDS;
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'yaa-media-provider-'));
     const db = new Database();
     db.dbPath = path.join(directory, 'media.db');
@@ -1165,7 +1371,7 @@ class SystemTest {
         throw new Error('Provider task identity and model evidence did not persist');
       }
       const providers = registry.list();
-      for (const id of ['seedance', 'minimax_h3', 'google_omni', 'kling', 'wan', 'slideshow']) {
+      for (const id of ['seedance', 'minimax_h3', 'google_omni', 'kling', 'wan', 'comfyui', 'slideshow']) {
         if (!providers.find(provider => provider.id === id)) throw new Error(`Missing video provider: ${id}`);
       }
       const shortOnly = new VideoProvider('wan', { model: 'wan-test', capabilities: { minDuration: 2, maxDuration: 15, firstFrame: true } });
@@ -1231,7 +1437,123 @@ class SystemTest {
       if (wanTask.externalTaskId !== 'wan-task' || wanBody.model !== 'wan2.7-t2v-2026-06-12' || wanBody.parameters.resolution !== '720P') {
         throw new Error('Wan adapter did not submit the expected task-specific model payload');
       }
+
+      const comfyWorkflow = {
+        '1': { class_type: 'TextEncode', inputs: { text: '{{PROMPT}}' } },
+        '2': { class_type: 'VideoSampler', inputs: { frames: '{{FRAMES}}', width: '{{WIDTH}}', height: '{{HEIGHT}}', seed: '{{SEED}}', seconds: '{{DURATION}}' } }
+      };
+      const comfyRequests = [];
+      const comfy = new ComfyUIProvider({}, {
+        baseURL: 'http://127.0.0.1:8188',
+        workflow: comfyWorkflow,
+        frameRate: 12,
+        http: {
+          get: async (url, options) => {
+            comfyRequests.push({ method: 'GET', url, options });
+            if (url.endsWith('/system_stats')) return { data: { devices: [] } };
+            if (url.includes('/history/')) return { data: {
+              'comfy-task': {
+                status: { completed: true, status_str: 'success' },
+                outputs: { '3': { videos: [{ filename: 'scene.mp4', subfolder: '', type: 'output' }] } }
+              }
+            } };
+            return { data: await fs.readFile(source) };
+          },
+          post: async (url, body, options) => {
+            comfyRequests.push({ method: 'POST', url, body, options });
+            return { data: { prompt_id: 'comfy-task' } };
+          }
+        }
+      });
+      const preparedWorkflow = comfy.createWorkflow({
+        prompt: 'A rendered local scene', duration: 5, aspectRatio: '16:9', resolution: '720p'
+      });
+      if (preparedWorkflow['1'].inputs.text !== 'A rendered local scene' ||
+          preparedWorkflow['2'].inputs.frames !== 60 ||
+          preparedWorkflow['2'].inputs.seconds !== 5 ||
+          preparedWorkflow['2'].inputs.width !== 1280) {
+        throw new Error('ComfyUI workflow placeholders were not substituted with correctly typed values');
+      }
+      const portraitWorkflow = comfy.createWorkflow({
+        prompt: 'Portrait format', duration: 5, aspectRatio: '9:16', resolution: '720p'
+      });
+      if (portraitWorkflow['2'].inputs.width !== 720 || portraitWorkflow['2'].inputs.height !== 1280) {
+        throw new Error('ComfyUI portrait workflow dimensions did not preserve the selected resolution');
+      }
+      await comfy.checkConnection();
+      const comfyTask = await comfy.createTask({ prompt: 'A rendered local scene', duration: 5 });
+      const completedComfyTask = await comfy.getTask(comfyTask.externalTaskId);
+      const comfyOutput = path.join(directory, 'comfy-output.mp4');
+      await comfy.downloadResult(completedComfyTask, comfyOutput);
+      if (comfyTask.externalTaskId !== 'comfy-task' || completedComfyTask.status !== 'succeeded' ||
+          !(await fs.readFile(comfyOutput)).subarray(4, 32).toString('ascii').includes('ftyp') ||
+          !comfyRequests.some(request => request.url.includes('/view?filename=scene.mp4'))) {
+        throw new Error('ComfyUI prompt submission, history polling, or local MP4 download failed');
+      }
+      if (comfyRequests.some(request => request.options.maxRedirects !== 0)) {
+        throw new Error('ComfyUI client allowed a redirect instead of remaining on the validated loopback server');
+      }
+      let remoteURLRejected = false;
+      try {
+        comfy.configure({ baseURL: 'https://example.com' });
+      } catch (_error) {
+        remoteURLRejected = true;
+      }
+      if (!remoteURLRejected) throw new Error('ComfyUI accepted a non-loopback server URL');
+
+      await db.setSetting('video_provider', 'comfyui');
+      const unconfiguredService = new MediaGenerationService(db, {}, {
+        registry: new VideoProviderRegistry({}, { providers: { comfyui: new ComfyUIProvider({}) } })
+      });
+      let missingWorkflowRejected = false;
+      try {
+        await unconfiguredService.generateClips({
+          jobId: job.id, productionId: 'missing-comfy-workflow', script: {},
+          outputDir: directory
+        });
+      } catch (error) {
+        missingWorkflowRejected = /no valid API workflow is configured/i.test(error.message);
+      }
+      if (!missingWorkflowRejected) throw new Error('Explicit ComfyUI selection silently fell back without an API workflow');
+
+      await db.setSetting('comfyui_base_url', 'http://127.0.0.1:8199');
+      await db.setSetting('comfyui_workflow', JSON.stringify(comfyWorkflow));
+      await db.setSetting('comfyui_frame_rate', '30');
+      const configuredService = new MediaGenerationService(db, { comfyui: { apiKey: 'local-test-token' } }, {
+        registry: new VideoProviderRegistry({}, { providers: { comfyui: comfy } })
+      });
+      await configuredService.settings();
+      if (comfy.baseURL !== 'http://127.0.0.1:8199' || comfy.frameRate !== 30 || comfy.apiKey !== 'local-test-token') {
+        throw new Error('Persisted ComfyUI settings or local credentials were not applied to the provider');
+      }
+      const { ProductionReadinessService } = require('./utils/production-readiness-service');
+      const readiness = new ProductionReadinessService(db, { credentials: { comfyui: { apiKey: 'local-test-token' } } });
+      const imageProbe = await readiness.probeImage(directory, true);
+      const videoProbe = await readiness.probeVideoProvider(directory, false);
+      if (imageProbe.status !== 'skipped' || !/cloud image generation is not required/i.test(imageProbe.message) ||
+          videoProbe.status !== 'skipped' || !/local live video probe was not requested/i.test(videoProbe.message)) {
+        throw new Error('Readiness checks did not recognize ComfyUI as a local visual provider');
+      }
+      const { ProductionManagementAgent } = require('./agents/production-management-agent');
+      let cloudImageCalls = 0;
+      const productionAgent = Object.create(ProductionManagementAgent.prototype);
+      productionAgent.db = db;
+      productionAgent.logger = { info() {}, error() {} };
+      productionAgent.aiVideoGenerator = {
+        mediaGeneration: configuredService,
+        generateVisualAssets: async () => { cloudImageCalls++; return []; }
+      };
+      productionAgent.createVisualPromptsFromScript = () => ['A local ComfyUI scene'];
+      const productionData = { script: {}, estimatedDuration: '00:01:00', assets: {}, timeline: {} };
+      await productionAgent.generateVideoContent(productionData);
+      if (cloudImageCalls !== 0 || productionData.assets.video.generatedWith !== 'ComfyUI') {
+        throw new Error('ComfyUI production still invoked cloud image generation or reported the wrong provider');
+      }
     } finally {
+      for (const [key, value] of Object.entries(mediaEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
       await db.close();
       await fs.rm(directory, { recursive: true, force: true });
     }
@@ -1975,7 +2297,11 @@ class SystemTest {
     const { CredentialManager } = require('./utils/credential-manager');
     const { YouTubeAutomationAgent } = require('./index');
 
-    const envKeys = ['OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'GEMINI_API_KEY', 'MOONSHOT_API_KEY', 'MIMO_API_KEY', 'GLM_API_KEY', 'HOST', 'API_KEY', 'NODE_ENV'];
+    const envKeys = [
+      'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'GEMINI_API_KEY', 'MOONSHOT_API_KEY',
+      'MIMO_API_KEY', 'GLM_API_KEY', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL',
+      'HOST', 'API_KEY', 'NODE_ENV'
+    ];
     const savedEnv = {};
     for (const key of envKeys) {
       savedEnv[key] = process.env[key];
@@ -3069,6 +3395,9 @@ class SystemTest {
       'VOICEBOX_MODEL_SIZE',
       'VOICEBOX_LANGUAGE',
       'VOICEBOX_INSTRUCT',
+      'VOICEBOX_MAX_CHUNK_CHARS',
+      'VOICEBOX_CROSSFADE_MS',
+      'VOICEBOX_NORMALIZE',
       'VOICEBOX_TIMEOUT_MS',
       'OPENAI_API_KEY',
       'GEMINI_API_KEY',
@@ -3082,6 +3411,7 @@ class SystemTest {
     }
 
     let generationRequest = null;
+    let createdPresetProfile = null;
     const audioBytes = Buffer.alloc(44 + 4800);
     audioBytes.write('RIFF', 0);
     audioBytes.writeUInt32LE(audioBytes.length - 8, 4);
@@ -3109,8 +3439,48 @@ class SystemTest {
           id: 'profile-local',
           name: 'Local narrator',
           language: 'en',
-          default_engine: 'kokoro'
-        }]));
+          voice_type: 'preset',
+          preset_engine: 'kokoro',
+          preset_voice_id: 'af_heart',
+          default_engine: 'kokoro',
+          sample_count: 0
+        }, ...(createdPresetProfile ? [createdPresetProfile] : [])]));
+        return;
+      }
+      if (request.method === 'POST' && request.url === '/profiles') {
+        const chunks = [];
+        for await (const chunk of request) chunks.push(chunk);
+        createdPresetProfile = {
+          id: 'preset-created',
+          ...JSON.parse(Buffer.concat(chunks).toString('utf8')),
+          sample_count: 0
+        };
+        response.writeHead(201, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify(createdPresetProfile));
+        return;
+      }
+      if (request.method === 'GET' && request.url === '/models/status') {
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify({ models: [
+          { model_name: 'kokoro', display_name: 'Kokoro 82M', downloaded: true, downloading: false, loaded: false, size_mb: 350 },
+          { model_name: 'qwen-tts-1.7B', display_name: 'Qwen TTS 1.7B', downloaded: true, downloading: false, loaded: true, size_mb: 3500 },
+          { model_name: 'whisper-large', display_name: 'Whisper Large', downloaded: true, downloading: false, loaded: false, size_mb: 3000 },
+          { model_name: 'whisper-turbo', display_name: 'Whisper Turbo', downloaded: true, downloading: false, loaded: false, size_mb: 1500 }
+        ] }));
+        return;
+      }
+      if (request.method === 'GET' && request.url.startsWith('/profiles/presets/')) {
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify({
+          engine: request.url.split('/').pop(),
+          voices: [{ voice_id: 'af_heart', name: 'Heart', language: 'en' }]
+        }));
+        return;
+      }
+      if (request.method === 'POST' && ['/models/load', '/models/unload', '/models/download'].includes(request.url)) {
+        for await (const chunk of request) void chunk;
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify({ message: `Mock ${request.url.split('/').pop()} completed` }));
         return;
       }
       if (request.method === 'POST' && request.url === '/generate/stream') {
@@ -3122,6 +3492,19 @@ class SystemTest {
           'Content-Length': audioBytes.length
         });
         response.end(audioBytes);
+        return;
+      }
+      if (request.method === 'POST' && request.url === '/transcribe') {
+        const chunks = [];
+        for await (const chunk of request) chunks.push(chunk);
+        const multipart = Buffer.concat(chunks).toString('latin1');
+        if (!multipart.includes('name="file"') || !multipart.includes('name="model"') || !multipart.includes('name="language"')) {
+          response.writeHead(400, { 'Content-Type': 'application/json' });
+          response.end(JSON.stringify({ detail: 'Expected file, model, and language multipart fields' }));
+          return;
+        }
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify({ text: 'Voicebox transcript', duration: 2.5 }));
         return;
       }
       response.writeHead(404);
@@ -3139,6 +3522,34 @@ class SystemTest {
       const profiles = await voicebox.listProfiles();
       if (health.status !== 'healthy' || profiles[0]?.id !== 'profile-local') {
         throw new Error('Voicebox health/profile discovery did not match the local API response');
+      }
+      const modelStatuses = await voicebox.getModelStatus();
+      const presets = await voicebox.listPresetVoices('kokoro');
+      if (!modelStatuses.some(model => model.model_name === 'whisper-turbo' && model.downloaded) || presets[0]?.voice_id !== 'af_heart') {
+        throw new Error('Voicebox model inventory or preset voice discovery was incorrect');
+      }
+      for (const operation of ['loadModel', 'unloadModel', 'downloadModel']) {
+        const result = await voicebox[operation]('kokoro');
+        if (!result.message.includes('completed')) throw new Error(`Voicebox ${operation} did not return its server result`);
+      }
+      const transcription = await voicebox.transcribeAudio(Buffer.from('test-audio'), 'test.wav', {
+        contentType: 'audio/wav',
+        model: 'large',
+        language: 'da'
+      });
+      if (transcription.text !== 'Voicebox transcript' || transcription.duration !== 2.5) {
+        throw new Error('Voicebox transcription response was not returned correctly');
+      }
+      const presetProfile = await voicebox.createPresetProfile({
+        name: 'Heart narrator',
+        language: 'en',
+        voice_type: 'preset',
+        preset_engine: 'kokoro',
+        preset_voice_id: 'af_heart',
+        default_engine: 'kokoro'
+      });
+      if (presetProfile.id !== 'preset-created' || presetProfile.preset_voice_id !== 'af_heart') {
+        throw new Error('Voicebox preset profile creation did not persist selected voice metadata');
       }
 
       if (normalizeVoiceboxUrl(baseUrl) !== baseUrl) {
@@ -3177,7 +3588,13 @@ class SystemTest {
 
       const generator = new AIVideoGenerator({
         ...manager.credentials,
-        voicebox: { ...manager.credentials.voicebox, modelSize: '0.6B' }
+        voicebox: {
+          ...manager.credentials.voicebox,
+          modelSize: '0.6B',
+          maxChunkChars: 1200,
+          crossfadeMs: 90,
+          normalize: false
+        }
       });
       const outputPath = path.join(directory, 'narration.mp3');
       const generatedPath = await generator.generateTTSAudio('Voicebox integration test.', outputPath);
@@ -3197,9 +3614,100 @@ class SystemTest {
         generationRequest.language !== 'en' ||
         generationRequest.engine !== 'kokoro' ||
         generationRequest.model_size !== '0.6B' ||
-        generationRequest.instruct !== 'Warm and clear delivery.'
+        generationRequest.instruct !== 'Warm and clear delivery.' ||
+        generationRequest.max_chunk_chars !== 1200 ||
+        generationRequest.crossfade_ms !== 90 ||
+        generationRequest.normalize !== false
       ) {
-        throw new Error('Voicebox generation request did not include the selected profile and settings');
+        throw new Error('Voicebox generation request did not include the selected profile, model, and audio settings');
+      }
+
+      const { YouTubeAutomationAgent } = require('./index');
+      const dashboard = new YouTubeAutomationAgent();
+      dashboard.credentials = {
+        credentials: { voicebox: { baseUrl } },
+        tokens: {}
+      };
+      dashboard.setupAPI();
+      let dashboardServer;
+      try {
+        dashboardServer = await new Promise(resolve => {
+          const running = dashboard.app.listen(0, '127.0.0.1', () => resolve(running));
+        });
+        const dashboardBase = `http://127.0.0.1:${dashboardServer.address().port}`;
+        const apiKeyHeaders = process.env.API_KEY ? { 'x-api-key': process.env.API_KEY } : {};
+        const catalogResponse = await fetch(`${dashboardBase}/api/configuration/voicebox/catalog`, {
+          headers: apiKeyHeaders
+        });
+        const catalog = await catalogResponse.json();
+        if (
+          !catalogResponse.ok ||
+          !catalog.result.engines.some(engine => engine.id === 'qwen_custom_voice' && engine.models.some(model => model.id === 'qwen-custom-voice-1.7B')) ||
+          !['qwen', 'qwen_voice_design', 'chatterbox', 'chatterbox_turbo', 'luxtts', 'kokoro', 'tada', 'omnivoice'].every(engine =>
+            catalog.result.engines.some(item => item.id === engine)
+          ) ||
+          !catalog.result.whisperModels.some(model => model.id === 'whisper-large' && model.downloaded) ||
+          catalog.result.profiles[0]?.presetEngine !== 'kokoro'
+        ) {
+          throw new Error('Dashboard did not expose the live Voicebox model/profile catalog');
+        }
+
+        const previewResponse = await fetch(`${dashboardBase}/api/configuration/voicebox/preview`, {
+          method: 'POST',
+          headers: { ...apiKeyHeaders, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            profileId: 'profile-local',
+            engine: 'kokoro',
+            language: 'en',
+            text: 'Dashboard Voicebox preview.'
+          })
+        });
+        const previewBytes = Buffer.from(await previewResponse.arrayBuffer());
+        if (!previewResponse.ok || previewBytes.toString('ascii', 0, 4) !== 'RIFF') {
+          throw new Error('Dashboard Voicebox preview did not return playable WAV audio');
+        }
+
+        const transcribeResponse = await fetch(
+          `${dashboardBase}/api/configuration/voicebox/transcribe?model=large&language=da&filename=sample.wav`,
+          { method: 'POST', headers: { ...apiKeyHeaders, 'Content-Type': 'audio/wav' }, body: Buffer.from('dashboard-audio') }
+        );
+        const transcribed = await transcribeResponse.json();
+        if (!transcribeResponse.ok || transcribed.result?.text !== 'Voicebox transcript') {
+          throw new Error(`Dashboard Whisper transcription failed: ${transcribed.error || 'no transcript returned'}`);
+        }
+
+        const downloadResponse = await fetch(`${dashboardBase}/api/configuration/voicebox/models/whisper-turbo/download`, {
+          method: 'POST',
+          headers: { ...apiKeyHeaders, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ baseUrl })
+        });
+        if (downloadResponse.status !== 202) throw new Error('Dashboard could not start a Voicebox model download');
+
+        const loadResponse = await fetch(`${dashboardBase}/api/configuration/voicebox/models/whisper-large/load`, {
+          method: 'POST',
+          headers: { ...apiKeyHeaders, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ baseUrl })
+        });
+        if (!loadResponse.ok) throw new Error('Dashboard could not load the downloaded Whisper model');
+
+        const unloadResponse = await fetch(`${dashboardBase}/api/configuration/voicebox/models/kokoro/unload`, {
+          method: 'POST',
+          headers: { ...apiKeyHeaders, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ baseUrl })
+        });
+        if (!unloadResponse.ok) throw new Error('Dashboard could not unload the selected Voicebox model');
+
+        const createPresetResponse = await fetch(`${dashboardBase}/api/configuration/voicebox/profiles/preset`, {
+          method: 'POST',
+          headers: { ...apiKeyHeaders, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ baseUrl, engine: 'kokoro', voiceId: 'af_heart', name: 'Dashboard narrator' })
+        });
+        const createdPreset = await createPresetResponse.json();
+        if (!createPresetResponse.ok || createdPreset.result?.preset_voice_id !== 'af_heart') {
+          throw new Error('Dashboard could not create a Voicebox preset voice profile');
+        }
+      } finally {
+        if (dashboardServer) await new Promise(resolve => dashboardServer.close(resolve));
       }
       if (generator.lastNarrationResult.cost.invoiceRequired) {
         throw new Error('Local Voicebox narration was incorrectly marked as requiring an external invoice');
@@ -4043,8 +4551,12 @@ class SystemTest {
     // (manager.credentials), the shape the walkthrough writes to credentials.json.
     // Passing the CredentialManager itself leaves the engagement studio permanently
     // in fallback mode on installs with no provider environment variables.
-    const savedEnv = process.env.OPENAI_API_KEY;
-    delete process.env.OPENAI_API_KEY;
+    const envKeys = [
+      'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'GEMINI_API_KEY', 'MOONSHOT_API_KEY',
+      'MIMO_API_KEY', 'GLM_API_KEY', 'ANTHROPIC_API_KEY'
+    ];
+    const savedEnv = Object.fromEntries(envKeys.map(key => [key, process.env[key]]));
+    for (const key of envKeys) delete process.env[key];
     try {
       const configured = new AITextService({
         aiProvider: { provider: 'openai', apiKey: 'test-key', model: 'gpt-5.6' }
@@ -4070,9 +4582,33 @@ class SystemTest {
       if (!local.isAvailable() || local.model !== 'qwen2.5-7b-instruct') {
         throw new Error('AITextService must initialize a local GGUF model using the OpenAI-compatible interface');
       }
+
+      const lmStudio = new AITextService({
+        aiProvider: {
+          provider: 'lmstudio',
+          baseURL: 'http://127.0.0.1:1234/v1',
+          model: 'qwen3-8b-instruct'
+        }
+      });
+      if (!lmStudio.isAvailable() || lmStudio.model !== 'qwen3-8b-instruct' || lmStudio.providerName !== 'LM Studio') {
+        throw new Error('AITextService must initialize LM Studio through its OpenAI-compatible local endpoint');
+      }
+      const manager = new CredentialManager();
+      manager.credentials = {
+        aiProvider: {
+          provider: 'lmstudio',
+          baseURL: 'http://127.0.0.1:1234/v1',
+          model: 'qwen3-8b-instruct'
+        }
+      };
+      if (!manager.hasAITextProvider()) {
+        throw new Error('CredentialManager must recognize a configured LM Studio text provider');
+      }
     } finally {
-      if (savedEnv === undefined) delete process.env.OPENAI_API_KEY;
-      else process.env.OPENAI_API_KEY = savedEnv;
+      for (const key of envKeys) {
+        if (savedEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = savedEnv[key];
+      }
     }
   }
 

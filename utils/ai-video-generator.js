@@ -114,6 +114,13 @@ class AIVideoGenerator {
     this.voiceboxModelSize = voicebox.modelSize || process.env.VOICEBOX_MODEL_SIZE || null;
     this.voiceboxLanguage = voicebox.language || process.env.VOICEBOX_LANGUAGE || 'en';
     this.voiceboxInstruct = voicebox.instruct || process.env.VOICEBOX_INSTRUCT || null;
+    const maxChunkChars = Number(voicebox.maxChunkChars ?? process.env.VOICEBOX_MAX_CHUNK_CHARS ?? 800);
+    this.voiceboxMaxChunkChars = Number.isInteger(maxChunkChars) && maxChunkChars >= 100 && maxChunkChars <= 5000
+      ? maxChunkChars : 800;
+    const crossfadeMs = Number(voicebox.crossfadeMs ?? process.env.VOICEBOX_CROSSFADE_MS ?? 50);
+    this.voiceboxCrossfadeMs = Number.isInteger(crossfadeMs) && crossfadeMs >= 0 && crossfadeMs <= 500
+      ? crossfadeMs : 50;
+    this.voiceboxNormalize = voicebox.normalize !== false && process.env.VOICEBOX_NORMALIZE !== 'false';
     this.voiceboxTimeoutMs = process.env.VOICEBOX_TIMEOUT_MS || 0;
     this.ttsProvider = process.env.TTS_PROVIDER || resolvedCredentials.ttsProvider || null;
     this.voicebox = null;
@@ -122,7 +129,7 @@ class AIVideoGenerator {
     this.azureSpeechKey = resolvedCredentials.azure?.speechKey || process.env.AZURE_SPEECH_KEY;
     this.azureSpeechRegion = resolvedCredentials.azure?.speechRegion || process.env.AZURE_SPEECH_REGION;
     this.mediaGeneration = options.mediaGeneration || (this.db
-      ? new MediaGenerationService(this.db, resolvedCredentials, { logger: this.logger })
+      ? new MediaGenerationService(this.db, credentials || resolvedCredentials, { logger: this.logger })
       : null);
   }
 
@@ -225,7 +232,10 @@ class AIVideoGenerator {
     const request = {
       profile_id: this.voiceboxProfileId,
       text,
-      language: this.voiceboxLanguage
+      language: this.voiceboxLanguage,
+      max_chunk_chars: this.voiceboxMaxChunkChars,
+      crossfade_ms: this.voiceboxCrossfadeMs,
+      normalize: this.voiceboxNormalize
     };
     if (this.voiceboxEngine) request.engine = this.voiceboxEngine;
     if (this.voiceboxModelSize) request.model_size = this.voiceboxModelSize;
@@ -499,6 +509,11 @@ class AIVideoGenerator {
           visualAssets,
           outputDir: path.dirname(outputPath)
         });
+        if (generated.requestedProvider === 'comfyui' && generated.actualProvider === 'comfyui' &&
+            generated.settings.mode !== 'slideshow' && generated.settings.maxGeneratedSeconds > 0 &&
+            generated.clips.length === 0) {
+          throw new Error('ComfyUI was selected, but the script did not produce any video scene prompts to render.');
+        }
         if (generated.clips.length) {
           const produced = await this.generateHybridVideo(
             generated.clips,
@@ -531,6 +546,22 @@ class AIVideoGenerator {
       // reason inline. Previously the stack alone went to the file transport and
       // the console printed "Video generation failed:" with no detail.
       const reason = error && error.message ? error.message : String(error);
+      const configuredProvider = this.mediaGeneration
+        ? (await this.mediaGeneration.settings()).provider
+        : null;
+      if (configuredProvider === 'comfyui') {
+        this.lastVideoResult = {
+          requestedProvider: 'comfyui',
+          actualProvider: 'failed',
+          model: 'ComfyUI API workflow',
+          mode: 'local',
+          generatedSeconds: 0,
+          fallbackReason: reason,
+          tasks: [],
+          scenes: []
+        };
+        throw error;
+      }
       this.logger.error(`Video provider generation failed; using the local slideshow: ${reason}`, error);
       try {
         const produced = await this.generateSlideshowVideo(script, visualAssets, audioPath, outputPath);

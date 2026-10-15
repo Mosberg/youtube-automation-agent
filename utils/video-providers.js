@@ -1,10 +1,11 @@
 const crypto = require('crypto');
 const fs = require('fs').promises;
 const path = require('path');
+const { URLSearchParams } = require('url');
 const axios = require('axios');
 const Replicate = require('replicate');
 
-const DEFAULT_PROVIDER_ORDER = ['seedance', 'minimax_h3', 'google_omni', 'kling', 'wan', 'slideshow'];
+const DEFAULT_PROVIDER_ORDER = ['comfyui', 'seedance', 'minimax_h3', 'google_omni', 'kling', 'wan', 'slideshow'];
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, Number(value)));
 
@@ -21,6 +22,21 @@ function safeModelError(error) {
     .replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, 'Bearer [redacted]')
     .replace(/(api[_-]?key|token|secret)=([^\s&]+)/gi, '$1=[redacted]')
     .slice(0, 500);
+}
+
+function normalizeComfyUIURL(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch (_error) {
+    throw new Error('ComfyUI URL must be a valid HTTP(S) localhost URL');
+  }
+  const host = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const loopback = host === 'localhost' || host === '::1' || host === '0:0:0:0:0:0:0:1' || /^127\./.test(host);
+  if (!['http:', 'https:'].includes(parsed.protocol) || !loopback || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error('ComfyUI URL must be an HTTP(S) localhost URL without credentials, query, or fragment');
+  }
+  return parsed.toString().replace(/\/+$/, '');
 }
 
 async function fileToDataUrl(filePath) {
@@ -409,6 +425,162 @@ class WanProvider extends VideoProvider {
   }
 }
 
+class ComfyUIProvider extends VideoProvider {
+  constructor(credentials = {}, options = {}) {
+    const config = normalizeCredentials(credentials).comfyui || {};
+    super('comfyui', {
+      model: 'ComfyUI API workflow',
+      capabilities: {
+        local: true, text: true, minDuration: 2, maxDuration: 30,
+        maxPromptLength: 4000, firstFrame: false, nativeAudio: false
+      }
+    });
+    this.baseURL = normalizeComfyUIURL(options.baseURL || config.baseURL || process.env.COMFYUI_BASE_URL || 'http://127.0.0.1:8188');
+    this.apiKey = options.apiKey || config.apiKey || process.env.COMFYUI_API_KEY || '';
+    this.workflow = options.workflow || null;
+    this.frameRate = Number(options.frameRate || 24);
+    this.http = options.http || axios;
+    this.clientId = options.clientId || crypto.randomUUID();
+  }
+
+  configure({ baseURL, workflow, frameRate, apiKey } = {}) {
+    if (baseURL) this.baseURL = normalizeComfyUIURL(baseURL);
+    if (workflow !== undefined) this.workflow = workflow;
+    if (Number.isFinite(Number(frameRate)) && Number(frameRate) >= 1 && Number(frameRate) <= 60) {
+      this.frameRate = Number(frameRate);
+    }
+    if (apiKey !== undefined) this.apiKey = apiKey;
+  }
+
+  isAvailable() {
+    return Boolean(this.baseURL && this.workflow && Object.keys(this.workflow).length);
+  }
+
+  headers() {
+    return this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {};
+  }
+
+  async checkConnection() {
+    const response = await this.http.get(`${this.baseURL}/system_stats`, {
+      headers: this.headers(), timeout: 10000, maxRedirects: 0
+    });
+    return response.data;
+  }
+
+  normalizeRequest(request = {}) {
+    return {
+      ...super.normalizeRequest(request),
+      duration: clamp(request.duration || 5, 2, 30),
+      prompt: String(request.prompt || '').slice(0, 4000),
+      frameRate: this.frameRate
+    };
+  }
+
+  createWorkflow(request) {
+    if (!this.workflow) throw new Error('Import a ComfyUI API workflow before generating local video.');
+    const workflow = JSON.parse(JSON.stringify(this.workflow));
+    const aspect = String(request.aspectRatio || '16:9').split(':').map(Number);
+    const ratio = aspect.length === 2 && aspect.every(Number.isFinite) && aspect[0] > 0 && aspect[1] > 0
+      ? aspect[0] / aspect[1] : 16 / 9;
+    const longEdge = ({ '480p': 480, '720p': 720, '1080p': 1080 })[String(request.resolution).toLowerCase()] || 720;
+    const values = {
+      PROMPT: request.prompt,
+      DURATION: request.duration,
+      FRAMES: Math.max(1, Math.round(request.duration * this.frameRate)),
+      WIDTH: Math.max(64, Math.round((ratio >= 1 ? longEdge * ratio : longEdge) / 8) * 8),
+      HEIGHT: Math.max(64, Math.round((ratio >= 1 ? longEdge : longEdge / ratio) / 8) * 8),
+      SEED: crypto.randomInt(1, 2147483647)
+    };
+    let hasPrompt = false;
+    const replace = value => {
+      if (typeof value === 'string') {
+        const exact = /^\{\{(PROMPT|DURATION|FRAMES|WIDTH|HEIGHT|SEED)\}\}$/.exec(value);
+        if (exact) {
+          if (exact[1] === 'PROMPT') hasPrompt = true;
+          return values[exact[1]];
+        }
+        return value.replace(/\{\{(PROMPT|DURATION|FRAMES|WIDTH|HEIGHT|SEED)\}\}/g, (_match, key) => {
+          if (key === 'PROMPT') hasPrompt = true;
+          return String(values[key]);
+        });
+      }
+      if (Array.isArray(value)) return value.map(replace);
+      if (value && typeof value === 'object') {
+        for (const [key, child] of Object.entries(value)) value[key] = replace(child);
+      }
+      return value;
+    };
+    replace(workflow);
+    if (!hasPrompt) throw new Error('The ComfyUI API workflow must contain the {{PROMPT}} placeholder.');
+    return workflow;
+  }
+
+  async createTask(input) {
+    if (!this.isAvailable()) throw new Error('Configure a ComfyUI API workflow before generating local video.');
+    const request = this.normalizeRequest(input);
+    const response = await this.http.post(`${this.baseURL}/prompt`, {
+      prompt: this.createWorkflow(request),
+      client_id: this.clientId
+    }, { headers: { ...this.headers(), 'Content-Type': 'application/json' }, timeout: 30000, maxRedirects: 0 });
+    const promptId = response.data?.prompt_id;
+    if (typeof promptId !== 'string' || !promptId) {
+      throw new Error(response.data?.error?.message || 'ComfyUI did not return a prompt_id.');
+    }
+    return {
+      externalTaskId: promptId,
+      status: 'queued',
+      model: this.model,
+      providerData: { baseURL: this.baseURL },
+      error: null
+    };
+  }
+
+  async getTask(promptId, providerData = {}) {
+    const baseURL = providerData.baseURL || this.baseURL;
+    const response = await this.http.get(`${baseURL}/history/${encodeURIComponent(promptId)}`, {
+      headers: this.headers(), timeout: 15000, maxRedirects: 0
+    });
+    const history = response.data?.[promptId];
+    if (!history) return { externalTaskId: promptId, status: 'running', outputUrl: null, error: null };
+    const status = history.status || {};
+    if (status.status_str === 'error' || status.status_str === 'failed') {
+      return {
+        externalTaskId: promptId, status: 'failed', outputUrl: null, baseURL,
+        error: safeModelError(status.messages?.flat?.().join(' ') || status.status_str)
+      };
+    }
+    const outputs = Object.values(history.outputs || {});
+    const video = outputs.flatMap(output => [...(output.videos || []), ...(output.gifs || [])])
+      .find(file => typeof file.filename === 'string' && /\.mp4$/i.test(file.filename));
+    if (status.completed && video) {
+      return { externalTaskId: promptId, status: 'succeeded', outputUrl: video, baseURL, error: null };
+    }
+    if (status.completed && !video) {
+      return {
+        externalTaskId: promptId, status: 'failed', outputUrl: null, baseURL,
+        error: 'ComfyUI workflow completed without an MP4 video output. Add a video output node that saves MP4.'
+      };
+    }
+    return { externalTaskId: promptId, status: 'running', outputUrl: null, baseURL, error: null };
+  }
+
+  async downloadResult(task, outputPath) {
+    const file = task.outputUrl;
+    if (!file?.filename) throw new Error('ComfyUI completed without an MP4 output');
+    const params = new URLSearchParams({
+      filename: file.filename,
+      subfolder: file.subfolder || '',
+      type: file.type || 'output'
+    });
+    const response = await this.http.get(`${task.baseURL || this.baseURL}/view?${params}`, {
+      headers: this.headers(), responseType: 'arraybuffer', timeout: 300000, maxRedirects: 0
+    });
+    await fs.mkdir(path.dirname(outputPath), { recursive: true });
+    await fs.writeFile(outputPath, Buffer.from(response.data));
+    return outputPath;
+  }
+}
+
 class SlideshowProvider extends VideoProvider {
   constructor() {
     super('slideshow', { model: 'local-ffmpeg', capabilities: { local: true, text: true, maxDuration: Infinity } });
@@ -425,6 +597,7 @@ class VideoProviderRegistry {
       ['google_omni', injected.google_omni || new GoogleOmniProvider(credentials, options.google_omni)],
       ['kling', injected.kling || new KlingProvider(credentials, options.kling)],
       ['wan', injected.wan || new WanProvider(credentials, options.wan)],
+      ['comfyui', injected.comfyui || new ComfyUIProvider(credentials, options.comfyui)],
       ['slideshow', injected.slideshow || new SlideshowProvider()]
     ]);
   }
@@ -454,6 +627,7 @@ module.exports = {
   GoogleOmniProvider,
   KlingProvider,
   WanProvider,
+  ComfyUIProvider,
   SlideshowProvider,
   safeModelError
 };

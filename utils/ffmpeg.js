@@ -1,5 +1,6 @@
 const { execFile } = require('child_process');
 const fs = require('fs');
+const path = require('path');
 const { promisify } = require('util');
 
 const execFileAsync = promisify(execFile);
@@ -19,6 +20,11 @@ function getFFmpegPath() {
 
   if (process.env.FFMPEG_PATH) {
     cachedPath = process.env.FFMPEG_PATH;
+    if (fs.existsSync(cachedPath) && fs.statSync(cachedPath).isDirectory()) {
+      const binaryName = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
+      const binaryPath = path.join(cachedPath, binaryName);
+      if (fs.existsSync(binaryPath)) cachedPath = binaryPath;
+    }
     return cachedPath;
   }
 
