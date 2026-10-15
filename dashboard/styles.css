@@ -359,6 +359,20 @@ label:has(input:disabled) > span { color: var(--muted); }
 .section-intro select { width: auto; min-width: 170px; }
 
 .settings-form { max-width: 920px; }
+.integrations-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.integrations-grid > .panel { display: grid; align-content: start; gap: 14px; }
+.integrations-grid label { margin-top: 2px; }
+.provider-fields { display: grid; gap: 14px; }
+.setup-status-panel { display: grid; grid-template-columns: minmax(200px, .6fr) 1.4fr; gap: 20px; align-items: start; margin-bottom: 16px; }
+.setup-status-panel h2 { margin: 0; }
+.integration-status-list { display: flex; flex-wrap: wrap; gap: 8px; align-content: start; }
+.integration-status-item { border: 1px solid var(--line); border-radius: 999px; padding: 7px 11px; color: var(--muted); font-size: 11px; }
+.integration-status-item strong { color: var(--text); font-weight: 650; }
+.integration-status-item.ready { border-color: rgba(98, 203, 153, .32); color: #8fdbb7; }
+.youtube-setup-panel { max-width: 920px; margin: 16px 0; }
+.youtube-setup-panel > p { color: var(--muted); font-size: 12px; line-height: 1.6; }
+.youtube-setup-panel .form-grid { gap: 14px; }
+.align-end { align-self: end; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .form-grid.two { grid-template-columns: 1fr 1fr; }
 .full-row { grid-column: 1 / -1; }
@@ -714,7 +728,9 @@ label:has(input:disabled) > span { color: var(--muted); }
 
 /* ============ Responsive ============ */
 @media (max-width: 900px) {
-  .app-shell { grid-template-columns: minmax(0, 1fr); width: 100%; max-width: 100vw; overflow: hidden; }
+  .app-shell { grid-template-columns: minmax(0, 1fr); width: 100%; max-width: 100vw; overflow: hidden;     .integrations-grid { grid-template-columns: 1fr; }
+    .setup-status-panel { grid-template-columns: 1fr; }
+  }
   .sidebar { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 14px 16px; }
   .brand { padding-bottom: 12px; }
   .sidebar-label { display: none; }

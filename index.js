@@ -25,13 +25,31 @@ const { SceneRepairService } = require('./utils/scene-repair-service');
 const { ShortsRepurposingService } = require('./utils/shorts-repurposing-service');
 const { AudienceEngagementService } = require('./utils/audience-engagement-service');
 const { GrowthExperimentService } = require('./utils/growth-experiment-service');
-const { AITextService } = require('./utils/ai-text-service');
+const { AITextService, PROVIDERS, GEMINI_MODELS, GEMINI_DEFAULT_MODEL } = require('./utils/ai-text-service');
 const { DiscoverabilityService } = require('./utils/discoverability-service');
+const { VoiceboxService, DEFAULT_VOICEBOX_URL } = require('./utils/voicebox-service');
 const { version } = require('./package.json');
 const chalk = require('chalk');
 
 function isLoopbackHost(host) {
   return ['127.0.0.1', '::1', 'localhost'].includes(String(host).toLowerCase()) || /^127\./.test(String(host));
+}
+
+function normalizeLocalModelBaseURL(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch (_error) {
+    throw new Error('Local GGUF URL must be a valid HTTP(S) localhost URL');
+  }
+  if (
+    !['http:', 'https:'].includes(parsed.protocol) ||
+    !isLoopbackHost(parsed.hostname.replace(/^\[|\]$/g, '')) ||
+    parsed.username || parsed.password || parsed.search || parsed.hash
+  ) {
+    throw new Error('Local GGUF URL must be an HTTP(S) localhost URL without credentials, query, or fragment');
+  }
+  return parsed.toString().replace(/\/+$/, '');
 }
 
 class YouTubeAutomationAgent {
@@ -56,6 +74,8 @@ class YouTubeAutomationAgent {
     this.experiments = null;
     this.discoverability = null;
     this.setupRequired = false;
+    this.dashboardAuth = { status: 'idle', error: null };
+    this.dashboardConfigurationRestartRequired = false;
   }
 
   async initialize() {
@@ -187,6 +207,7 @@ class YouTubeAutomationAgent {
       creds.openai?.apiKey || process.env.OPENAI_API_KEY ||
       creds.elevenLabs?.apiKey || process.env.ELEVENLABS_API_KEY ||
       creds.azureSpeech?.subscriptionKey || process.env.AZURE_SPEECH_KEY ||
+      creds.voicebox?.profileId || process.env.VOICEBOX_PROFILE_ID ||
       hasGemini
     );
     const hasFFmpeg = await checkFFmpeg();
@@ -487,6 +508,341 @@ class YouTubeAutomationAgent {
 
   setupOperatorAPI() {
     const protect = this.requireAPIKey();
+
+    this.app.get('/api/configuration', async (_req, res) => {
+      try {
+        const credentials = this.credentials?.credentials || {};
+        const providerCatalog = {
+          local: {
+            name: 'Local GGUF (llama.cpp)',
+            models: credentials.aiProvider?.provider === 'local' && credentials.aiProvider?.model
+              ? [credentials.aiProvider.model] : [],
+            defaultModel: credentials.aiProvider?.model || '',
+            envKey: null
+          },
+          gemini: {
+            name: 'Google Gemini',
+            models: GEMINI_MODELS,
+            defaultModel: GEMINI_DEFAULT_MODEL,
+            envKey: 'GEMINI_API_KEY'
+          },
+          ...Object.fromEntries(Object.entries(PROVIDERS).map(([id, provider]) => [id, {
+            name: provider.name,
+            models: provider.models,
+            defaultModel: provider.defaultModel,
+            envKey: provider.envKey
+          }]))
+        };
+        const savedProvider = credentials.aiProvider?.provider;
+        const savedProviderConfigured = savedProvider === 'local'
+          ? Boolean(credentials.aiProvider?.baseURL && credentials.aiProvider?.model)
+          : savedProvider === 'gemini'
+            ? Boolean(credentials.aiProvider?.apiKey || credentials.gemini?.apiKey || process.env.GEMINI_API_KEY)
+            : Boolean(providerCatalog[savedProvider] && (
+              credentials.aiProvider?.apiKey || process.env[providerCatalog[savedProvider].envKey]
+            ));
+        const aiProvider = savedProviderConfigured
+          ? savedProvider
+          : Object.entries(PROVIDERS).find(([id, provider]) =>
+            (id === 'openai' && credentials.openai?.apiKey) || process.env[provider.envKey]
+          )?.[0] || (credentials.gemini?.apiKey || process.env.GEMINI_API_KEY ? 'gemini' : null);
+        const textProviders = Object.entries(providerCatalog).map(([id, provider]) => ({
+          id,
+          name: provider.name,
+          models: provider.models,
+          defaultModel: provider.defaultModel,
+          configured: Boolean(
+            (id === 'local' && credentials.aiProvider?.provider === 'local' && credentials.aiProvider?.baseURL && credentials.aiProvider?.model) ||
+            (id === 'gemini' && (credentials.aiProvider?.provider === 'gemini' && credentials.aiProvider?.apiKey || credentials.gemini?.apiKey)) ||
+            (id === 'openai' && credentials.openai?.apiKey) ||
+            (credentials.aiProvider?.provider === id && credentials.aiProvider?.apiKey) ||
+            (provider.envKey && process.env[provider.envKey])
+          )
+        }));
+        const elevenLabsConfigured = Boolean(
+          (credentials.elevenLabs?.apiKey || process.env.ELEVENLABS_API_KEY) &&
+          (credentials.elevenLabs?.voiceId || process.env.ELEVENLABS_VOICE_ID)
+        );
+        const voicebox = credentials.voicebox || {};
+        return res.json({
+          success: true,
+          result: {
+            textProvider: {
+              selected: aiProvider,
+              localBaseUrl: credentials.aiProvider?.provider === 'local' ? credentials.aiProvider.baseURL || '' : '',
+              localModel: credentials.aiProvider?.provider === 'local' ? credentials.aiProvider.model || '' : '',
+              model: credentials.aiProvider?.model || credentials.gemini?.model ||
+                (aiProvider === 'anthropic' ? process.env.ANTHROPIC_MODEL : null) ||
+                providerCatalog[aiProvider]?.defaultModel || null,
+              providers: textProviders
+            },
+            tts: {
+              selected: process.env.TTS_PROVIDER || credentials.ttsProvider || 'auto',
+              configured: {
+                voicebox: Boolean(voicebox.profileId || process.env.VOICEBOX_PROFILE_ID),
+                elevenlabs: elevenLabsConfigured,
+                openai: Boolean(credentials.openai?.apiKey || process.env.OPENAI_API_KEY),
+                gemini: Boolean(credentials.gemini?.apiKey || process.env.GEMINI_API_KEY)
+              },
+              voicebox: {
+                baseUrl: voicebox.baseUrl || process.env.VOICEBOX_BASE_URL || DEFAULT_VOICEBOX_URL,
+                profileId: voicebox.profileId || process.env.VOICEBOX_PROFILE_ID || '',
+                engine: voicebox.engine || process.env.VOICEBOX_ENGINE || '',
+                modelSize: voicebox.modelSize || process.env.VOICEBOX_MODEL_SIZE || '',
+                language: voicebox.language || process.env.VOICEBOX_LANGUAGE || 'en',
+                instruct: voicebox.instruct || process.env.VOICEBOX_INSTRUCT || ''
+              },
+              elevenLabs: {
+                voiceId: credentials.elevenLabs?.voiceId || process.env.ELEVENLABS_VOICE_ID || ''
+              }
+            },
+            youtube: {
+              credentialsConfigured: Boolean(credentials.youtube?.client_id && credentials.youtube?.client_secret),
+              connected: Boolean(this.credentials?.tokens?.youtube),
+              auth: this.dashboardAuth
+            },
+            restartRequired: this.setupRequired || this.dashboardConfigurationRestartRequired
+          }
+        });
+      } catch (error) {
+        return res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    this.app.put('/api/configuration', protect, async (req, res) => {
+      try {
+        if (!this.credentials) return res.status(503).json({ success: false, error: 'Credential storage is not initialized' });
+
+        const body = req.body || {};
+        const providerCatalog = {
+          local: { models: [], defaultModel: '', envKey: null },
+          gemini: { models: GEMINI_MODELS, defaultModel: GEMINI_DEFAULT_MODEL, envKey: 'GEMINI_API_KEY' },
+          ...Object.fromEntries(Object.entries(PROVIDERS).map(([id, provider]) => [id, provider]))
+        };
+        const text = body.textProvider;
+        const tts = body.tts;
+        if (!text || !tts || typeof text !== 'object' || typeof tts !== 'object') {
+          return res.status(400).json({ success: false, error: 'Text-provider and TTS settings are required' });
+        }
+
+        const provider = providerCatalog[text.provider];
+        if (!provider) return res.status(400).json({ success: false, error: 'Unsupported text provider' });
+        const textKey = typeof text.apiKey === 'string' ? text.apiKey.trim() : '';
+        const current = this.credentials.credentials || {};
+        const existingTextKey = text.provider === 'gemini'
+          ? current.gemini?.apiKey
+          : text.provider === 'openai'
+            ? current.aiProvider?.provider === 'openai' ? current.aiProvider.apiKey : current.openai?.apiKey
+            : current.aiProvider?.provider === text.provider ? current.aiProvider.apiKey : null;
+        if (text.provider !== 'local' && !textKey && !existingTextKey && !process.env[provider.envKey]) {
+          return res.status(400).json({ success: false, error: `Enter an API key for ${text.provider}, or configure ${provider.envKey} in .env` });
+        }
+        const model = typeof text.model === 'string' ? text.model.trim() : '';
+        let localBaseURL;
+        if (text.provider === 'local') {
+          if (!model || model.length > 200) {
+            return res.status(400).json({ success: false, error: 'Enter the model name configured in the local GGUF server' });
+          }
+          try {
+            localBaseURL = normalizeLocalModelBaseURL(text.baseURL);
+          } catch (_error) {
+            return res.status(400).json({ success: false, error: 'Local GGUF URL must be an HTTP(S) localhost URL without credentials, query, or fragment' });
+          }
+        } else if (!provider.models?.includes(model)) {
+          return res.status(400).json({ success: false, error: 'Select a supported model for the chosen text provider' });
+        }
+
+        const allowedTTS = ['auto', 'voicebox', 'elevenlabs', 'openai', 'gemini'];
+        if (!allowedTTS.includes(tts.provider)) {
+          return res.status(400).json({ success: false, error: 'Unsupported narration provider' });
+        }
+        const voiceboxUrl = typeof tts.voicebox?.baseUrl === 'string' ? tts.voicebox.baseUrl.trim() : '';
+        const voiceboxProfileId = typeof tts.voicebox?.profileId === 'string' ? tts.voicebox.profileId.trim() : '';
+        const elevenLabsKey = typeof tts.elevenLabs?.apiKey === 'string' ? tts.elevenLabs.apiKey.trim() : '';
+        const elevenLabsVoiceId = typeof tts.elevenLabs?.voiceId === 'string' ? tts.elevenLabs.voiceId.trim() : '';
+        const ttsKey = typeof tts.apiKey === 'string' ? tts.apiKey.trim() : '';
+        const credentials = { ...current };
+
+        if (text.provider === 'gemini') {
+          credentials.gemini = {
+            ...current.gemini,
+            ...(textKey ? { apiKey: textKey } : {}),
+            model
+          };
+          credentials.aiProvider = {
+            provider: 'gemini',
+            model,
+            ...(textKey ? { apiKey: textKey } : {})
+          };
+        } else if (text.provider === 'local') {
+          credentials.aiProvider = {
+            provider: 'local',
+            baseURL: localBaseURL,
+            model,
+            ...(textKey ? { apiKey: textKey } : {})
+          };
+        } else {
+          const selectedKey = textKey || existingTextKey;
+          credentials.aiProvider = { provider: text.provider, apiKey: selectedKey, model };
+          if (text.provider === 'openai') {
+            credentials.openai = { ...current.openai, apiKey: selectedKey, model };
+          }
+        }
+
+        if (tts.provider === 'voicebox') {
+          if (!voiceboxProfileId) {
+            return res.status(400).json({ success: false, error: 'Select or enter a Voicebox voice profile ID' });
+          }
+          const { normalizeVoiceboxUrl } = require('./utils/voicebox-service');
+          try {
+            normalizeVoiceboxUrl(voiceboxUrl);
+          } catch (error) {
+            return res.status(400).json({ success: false, error: error.message });
+          }
+        }
+        if (tts.provider === 'openai' && ttsKey) {
+          credentials.openai = { ...(credentials.openai || {}), apiKey: ttsKey };
+        }
+        if (tts.provider === 'gemini' && ttsKey) {
+          credentials.gemini = { ...(credentials.gemini || {}), apiKey: ttsKey };
+        }
+        if (tts.provider === 'elevenlabs' && !(
+          (elevenLabsKey || current.elevenLabs?.apiKey || process.env.ELEVENLABS_API_KEY) &&
+          (elevenLabsVoiceId || current.elevenLabs?.voiceId || process.env.ELEVENLABS_VOICE_ID)
+        )) {
+          return res.status(400).json({ success: false, error: 'ElevenLabs requires an API key and Voice ID' });
+        }
+        if (tts.provider === 'openai' && !(credentials.openai?.apiKey || process.env.OPENAI_API_KEY)) {
+          return res.status(400).json({ success: false, error: 'OpenAI narration requires an OpenAI API key' });
+        }
+        if (tts.provider === 'gemini' && !(credentials.gemini?.apiKey || process.env.GEMINI_API_KEY)) {
+          return res.status(400).json({ success: false, error: 'Gemini narration requires a Gemini API key' });
+        }
+        if (tts.provider === 'voicebox') {
+          credentials.voicebox = {
+            ...(current.voicebox || {}),
+            baseUrl: voiceboxUrl,
+            profileId: voiceboxProfileId,
+            ...(typeof tts.voicebox?.engine === 'string' && tts.voicebox.engine.trim() ? { engine: tts.voicebox.engine.trim() } : {}),
+            ...(typeof tts.voicebox?.modelSize === 'string' && tts.voicebox.modelSize.trim() ? { modelSize: tts.voicebox.modelSize.trim() } : {}),
+            ...(typeof tts.voicebox?.language === 'string' && tts.voicebox.language.trim() ? { language: tts.voicebox.language.trim() } : {}),
+            ...(typeof tts.voicebox?.instruct === 'string' && tts.voicebox.instruct.trim() ? { instruct: tts.voicebox.instruct.trim() } : {})
+          };
+        }
+        if (tts.provider === 'elevenlabs') {
+          credentials.elevenLabs = {
+            ...(current.elevenLabs || {}),
+            ...(elevenLabsKey ? { apiKey: elevenLabsKey } : {}),
+            ...(elevenLabsVoiceId ? { voiceId: elevenLabsVoiceId } : {})
+          };
+        }
+        if (tts.provider === 'auto') delete credentials.ttsProvider;
+        else credentials.ttsProvider = tts.provider;
+
+        this.credentials.credentials = credentials;
+        await this.credentials.saveCredentials();
+        if (tts.provider === 'auto') delete process.env.TTS_PROVIDER;
+        else process.env.TTS_PROVIDER = tts.provider;
+
+        this.dashboardConfigurationRestartRequired = true;
+        const restartRequired = true;
+        return res.json({ success: true, result: { restartRequired, message: 'Settings saved securely. Restart the application to reinitialize providers.' } });
+      } catch (error) {
+        return res.status(400).json({ success: false, error: error.message });
+      }
+    });
+
+    this.app.post('/api/configuration/local-model/check', protect, async (req, res) => {
+      try {
+        const baseURL = typeof req.body?.baseURL === 'string' ? req.body.baseURL.trim() : '';
+        const model = typeof req.body?.model === 'string' ? req.body.model.trim() : '';
+        const apiKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
+        if (!model || model.length > 200) {
+          return res.status(400).json({ success: false, error: 'Enter a local HTTP(S) server URL and a model name' });
+        }
+        let normalizedBaseURL;
+        try {
+          normalizedBaseURL = normalizeLocalModelBaseURL(baseURL);
+        } catch (error) {
+          return res.status(400).json({ success: false, error: error.message });
+        }
+        const service = new AITextService({
+          aiProvider: {
+            provider: 'local',
+            baseURL: normalizedBaseURL,
+            model,
+            ...(apiKey ? { apiKey } : {})
+          }
+        });
+        if (!service.client) return res.status(503).json({ success: false, error: 'Local model client could not be initialized' });
+        await service.generateText('Reply with the single word OK.', { maxTokens: 16, temperature: 0 });
+        return res.json({ success: true, result: { message: 'Local model responded successfully.' } });
+      } catch (error) {
+        return res.status(502).json({ success: false, error: `Local model test failed: ${error.message}` });
+      }
+    });
+
+    this.app.post('/api/configuration/voicebox/check', protect, async (req, res) => {
+      try {
+        const service = new VoiceboxService({ baseUrl: req.body?.baseUrl });
+        const [health, profiles] = await Promise.all([service.getHealth(), service.listProfiles()]);
+        if (health?.status !== 'healthy') {
+          return res.status(502).json({ success: false, error: 'Voicebox did not report a healthy local server' });
+        }
+        return res.json({
+          success: true,
+          result: {
+            profiles: profiles.map(profile => ({
+              id: profile.id, name: profile.name, language: profile.language,
+              engine: profile.default_engine || ''
+            }))
+          }
+        });
+      } catch (error) {
+        return res.status(502).json({ success: false, error: error.message });
+      }
+    });
+
+    this.app.post('/api/configuration/youtube/connect', protect, async (req, res) => {
+      try {
+        if (!this.credentials) return res.status(503).json({ success: false, error: 'Credential storage is not initialized' });
+        if (this.dashboardAuth.status === 'pending') {
+          return res.status(409).json({ success: false, error: 'YouTube authorization is already in progress' });
+        }
+        const clientId = typeof req.body?.clientId === 'string' ? req.body.clientId.trim() : '';
+        const clientSecret = (typeof req.body?.clientSecret === 'string' ? req.body.clientSecret.trim() : '') ||
+          this.credentials.credentials?.youtube?.client_secret;
+        if (!clientId || !clientSecret) {
+          return res.status(400).json({ success: false, error: 'Google OAuth client ID and client secret are required' });
+        }
+        this.credentials.credentials = {
+          ...(this.credentials.credentials || {}),
+          youtube: {
+            client_id: clientId,
+            client_secret: clientSecret,
+            redirect_uris: ['http://127.0.0.1']
+          }
+        };
+        await this.credentials.saveCredentials();
+        this.dashboardAuth = { status: 'pending', error: null };
+        const auth = new (require('./modern-auth').ModernAuth)();
+        void auth.authenticate().then(async tokens => {
+          this.credentials.tokens ||= {};
+          this.credentials.tokens.youtube = tokens;
+          this.dashboardAuth = { status: 'connected', error: null };
+          this.dashboardConfigurationRestartRequired = true;
+        }).catch(error => {
+          this.dashboardAuth = { status: 'failed', error: error.message };
+        });
+        return res.status(202).json({
+          success: true,
+          result: { status: 'pending', message: 'Complete YouTube authorization in the browser window that opened.' }
+        });
+      } catch (error) {
+        this.dashboardAuth = { status: 'failed', error: error.message };
+        return res.status(400).json({ success: false, error: error.message });
+      }
+    });
 
     this.app.get('/api/dashboard', async (_req, res) => {
       try {

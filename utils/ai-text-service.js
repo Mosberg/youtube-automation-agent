@@ -74,8 +74,22 @@ class AITextService {
     const apiKey = credentials.aiProvider?.apiKey;
     const model = credentials.aiProvider?.model;
 
-    if (provider && PROVIDERS[provider] && apiKey) {
-      return this._initProvider(PROVIDERS[provider], apiKey, model);
+    if (provider === 'gemini') {
+      const key = apiKey || credentials.gemini?.apiKey || process.env.GEMINI_API_KEY;
+      if (key) return this._initGemini(key, model || credentials.gemini?.model);
+    }
+
+    if (provider === 'local' && credentials.aiProvider?.baseURL) {
+      return this._initOpenAICompatible({
+        name: 'Local GGUF (OpenAI-compatible)',
+        baseURL: credentials.aiProvider.baseURL,
+        defaultModel: model || 'local-model'
+      }, apiKey || 'local', model);
+    }
+
+    if (provider && PROVIDERS[provider]) {
+      const key = apiKey || process.env[PROVIDERS[provider].envKey];
+      if (key) return this._initProvider(PROVIDERS[provider], key, model);
     }
 
     for (const [, preset] of Object.entries(PROVIDERS)) {

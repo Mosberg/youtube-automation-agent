@@ -72,6 +72,20 @@ For direct Anthropic Claude access, choose **Anthropic Claude** in the walkthrou
 
 For manual configuration, set `TTS_PROVIDER=voicebox`, `VOICEBOX_BASE_URL=http://127.0.0.1:8000`, and `VOICEBOX_PROFILE_ID` in `.env`. Optionally set `VOICEBOX_ENGINE`, `VOICEBOX_MODEL_SIZE`, `VOICEBOX_LANGUAGE`, and `VOICEBOX_INSTRUCT`; without an explicit engine, Voicebox uses the selected profile's default. Keep Voicebox's unauthenticated API bound to localhost; do not expose it directly to an untrusted network. Voicebox replaces narration only—OpenAI or Gemini is still needed for AI-generated images.
 
+### Configure providers in the dashboard
+
+Open **Settings → Setup & controls** to choose a text model, configure narration, discover Voicebox profiles, and authorize YouTube in a browser. API keys and OAuth tokens are saved only in local owner-only credential/token files; the dashboard reports whether a secret is configured but never returns its value. Leave a secret field blank to keep the saved key. Provider and YouTube changes require restarting AgentTube before the running agents use them.
+
+### Local GGUF models
+
+Run a GGUF model using an OpenAI-compatible local server such as `llama.cpp`'s `llama-server`, then select **Local GGUF (llama.cpp)** in **Settings → Setup & controls**. For example:
+
+```powershell
+llama-server -m "C:\models\your-model.gguf" --host 127.0.0.1 --port 8080 --alias local-model
+```
+
+Set the server URL to `http://127.0.0.1:8080/v1`, the model ID to the server's model name/alias (for this example, `local-model`), and use **Test local model** before saving. The endpoint is restricted to localhost, does not require a cloud API key, and the model runs in the separately installed llama.cpp server; AgentTube does not download GGUF weights. Restart AgentTube after saving. A local text model handles scripts and planning, but image/video generation and narration still need their respective configured providers.
+
 ### Verify production readiness
 
 Before activating autonomous production, open **Production readiness** in the dashboard and choose **Run verified check**. The gate makes small live text and narration requests, verifies access to the connected YouTube channel, creates and decodes a temporary MP4 containing audio and video, and validates every queued upload's metadata. It never creates or uploads a YouTube video, and temporary probe assets are deleted after the run.

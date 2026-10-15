@@ -278,6 +278,7 @@ class SystemTest {
     let server;
     let job;
     let learningRecommendation;
+    const savedTTSProvider = process.env.TTS_PROVIDER;
 
     try {
       job = await db.createGenerationJob({ topic: 'Operator workflow test', style: 'explainer', length: 'short' });
@@ -301,6 +302,11 @@ class SystemTest {
       const agent = new YouTubeAutomationAgent();
       agent.db = db;
       agent.operator = operator;
+      agent.credentials = {
+        credentials: { youtube: { client_id: 'youtube-client-id', client_secret: 'youtube-private-secret' } },
+        tokens: { youtube: { access_token: 'youtube-access-token' } },
+        saveCredentials: async function() { this.saved = true; }
+      };
       agent.agents = {
         analytics: {
           getRecentAnalytics: async () => ({ totalVideos: 0, averagePerformanceScore: 0, topPerformers: [], insights: [] })
@@ -327,6 +333,66 @@ class SystemTest {
         dashboard.activation?.privacy !== 'local-only'
       ) {
         throw new Error('Operator dashboard API did not return its data contract');
+      }
+      const configurationResponse = await fetch(`http://127.0.0.1:${port}/api/configuration`);
+      const configuration = await configurationResponse.json();
+      const configurationText = JSON.stringify(configuration);
+      if (
+        !configurationResponse.ok ||
+        configuration.result?.youtube?.connected !== true ||
+        configuration.result?.youtube?.credentialsConfigured !== true ||
+        configurationText.includes('youtube-private-secret') ||
+        configurationText.includes('youtube-access-token')
+      ) {
+        throw new Error('Configuration API must report safe provider status without exposing credentials');
+      }
+      const saveConfiguration = await fetch(`http://127.0.0.1:${port}/api/configuration`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          textProvider: { provider: 'anthropic', model: 'claude-sonnet-5-5', apiKey: 'anthropic-ui-test-secret' },
+          tts: { provider: 'auto' }
+        })
+      });
+      const savedConfiguration = await saveConfiguration.json();
+      if (
+        !saveConfiguration.ok ||
+        !savedConfiguration.result?.restartRequired ||
+        !agent.credentials.saved ||
+        agent.credentials.credentials.aiProvider?.provider !== 'anthropic'
+      ) {
+        throw new Error('GUI provider settings were not securely persisted or did not require a restart');
+      }
+      const afterSave = await fetch(`http://127.0.0.1:${port}/api/configuration`);
+      const afterSaveData = await afterSave.json();
+      if (JSON.stringify(afterSaveData).includes('anthropic-ui-test-secret')) {
+        throw new Error('Configuration API returned a saved provider API key');
+      }
+      const rejectRemoteGGUF = await fetch(`http://127.0.0.1:${port}/api/configuration/local-model/check`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseURL: 'http://example.com/v1', model: 'local-model' })
+      });
+      if (rejectRemoteGGUF.status !== 400) {
+        throw new Error('Local GGUF test endpoint must reject non-local server URLs');
+      }
+      const saveLocalGGUF = await fetch(`http://127.0.0.1:${port}/api/configuration`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          textProvider: {
+            provider: 'local', baseURL: 'http://127.0.0.1:8080/v1',
+            model: 'qwen2.5-7b-instruct', apiKey: ''
+          },
+          tts: { provider: 'auto' }
+        })
+      });
+      if (
+        !saveLocalGGUF.ok ||
+        agent.credentials.credentials.aiProvider?.provider !== 'local' ||
+        agent.credentials.credentials.aiProvider?.model !== 'qwen2.5-7b-instruct'
+      ) {
+        throw new Error('GUI did not persist a local GGUF model without requiring a cloud API key');
       }
       const unavailableStart = await fetch(`http://127.0.0.1:${port}/api/operator/start`, {
         method: 'POST',
@@ -356,6 +422,8 @@ class SystemTest {
       }
     } finally {
       if (server) await new Promise(resolve => server.close(resolve));
+      if (savedTTSProvider === undefined) delete process.env.TTS_PROVIDER;
+      else process.env.TTS_PROVIDER = savedTTSProvider;
       if (job) await db.executeQuery('DELETE FROM generation_jobs WHERE id = ?', [job.id]);
       if (learningRecommendation) await db.executeQuery('DELETE FROM learning_recommendations WHERE id = ?', [learningRecommendation.id]);
       await db.close();
@@ -2586,6 +2654,14 @@ class SystemTest {
         throw new Error('Anthropic configuration was incorrectly reported as missing credentials');
       }
 
+      manager.credentials = {
+        youtube: { client_id: 'x' },
+        aiProvider: { provider: 'local', baseURL: 'http://127.0.0.1:8080/v1', model: 'local-model' }
+      };
+      if (manager.getMissingCredentials().length !== 0) {
+        throw new Error('Local GGUF configuration was incorrectly reported as missing credentials');
+      }
+
       manager.credentials = { youtube: { client_id: 'x' } };
       const missingProvider = manager.getMissingCredentials();
       if (missingProvider.length !== 1 || !/AI provider/.test(missingProvider[0])) {
@@ -3982,6 +4058,17 @@ class SystemTest {
       });
       if (wrapped.isAvailable()) {
         throw new Error('A CredentialManager-shaped argument must not look configured; index.js has to unwrap it');
+      }
+
+      const local = new AITextService({
+        aiProvider: {
+          provider: 'local',
+          baseURL: 'http://127.0.0.1:8080/v1',
+          model: 'qwen2.5-7b-instruct'
+        }
+      });
+      if (!local.isAvailable() || local.model !== 'qwen2.5-7b-instruct') {
+        throw new Error('AITextService must initialize a local GGUF model using the OpenAI-compatible interface');
       }
     } finally {
       if (savedEnv === undefined) delete process.env.OPENAI_API_KEY;

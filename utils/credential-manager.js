@@ -551,6 +551,13 @@ class CredentialManager {
   }
   // Validation methods
   hasAITextProvider() {
+    if (
+      this.credentials.aiProvider?.provider === 'local' &&
+      this.credentials.aiProvider?.baseURL &&
+      this.credentials.aiProvider?.model
+    ) {
+      return true;
+    }
     if (this.credentials.openai?.apiKey || this.credentials.gemini?.apiKey || this.credentials.aiProvider?.apiKey) {
       return true;
     }
@@ -568,7 +575,7 @@ class CredentialManager {
     }
 
     if (!this.hasAITextProvider()) {
-      missing.push('an AI provider (OpenAI, Anthropic Claude, Gemini, OpenRouter, Kimi, MiMo, or GLM)');
+      missing.push('an AI provider (OpenAI, Anthropic Claude, Gemini, OpenRouter, Kimi, MiMo, GLM, or a local GGUF model)');
     }
 
     return missing;

@@ -30,7 +30,7 @@
         <button class="nav-item" data-view="analytics"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 20.5h17"/><path d="M6.5 20V11M11 20V4.5M15.5 20v-7M20 20V8.5"/></svg> Analytics</button>
         <button class="nav-item" data-view="engagement"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5a8.4 8.4 0 01-9.1 8.4 9 9 0 01-3.8-.9L3 20l1-4.9A8.4 8.4 0 1121 11.5z"/><path d="M8 10h8M8 13.5h5"/></svg> Engagement</button>
         <button class="nav-item" data-view="readiness"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2.8l7.5 3v6c0 4.8-3.2 8.2-7.5 9.4-4.3-1.2-7.5-4.6-7.5-9.4v-6z"/><path d="M8.8 12.2l2.3 2.3 4.4-4.6"/></svg> Production readiness</button>
-        <button class="nav-item" data-view="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06A1.7 1.7 0 0015 19.4a1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.33-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.51 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9c.28.66.9 1.05 1.55 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.51 1z"/></svg> Channel setup</button>
+        <button class="nav-item" data-view="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06A1.7 1.7 0 0015 19.4a1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.33-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.51 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9c.28.66.9 1.05 1.55 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.51 1z"/></svg> Setup & settings</button>
       </nav>
       <div class="sidebar-footer">
         <div class="system-pill"><i id="system-dot"></i><span id="system-label">Connecting…</span></div>
@@ -54,7 +54,7 @@
       <div id="toast" class="toast hidden" role="status"></div>
 
       <section id="overview-view" class="view active">
-        <div id="setup-banner" class="setup-banner hidden"><div><strong>Finish setup to activate your agents</strong><p>The operator console is ready, but generation and publishing stay disabled until credentials are configured.</p></div><code>npm run walkthrough</code></div>
+        <div id="setup-banner" class="setup-banner hidden"><div><strong>Finish setup to activate your agents</strong><p>The operator console is ready, but generation and publishing stay disabled until credentials are configured.</p></div><button type="button" class="button secondary" data-go="settings">Open setup settings</button><code>npm run walkthrough</code></div>
         <div class="stats-grid">
           <article class="stat"><span>Needs review</span><strong id="stat-review">—</strong><small>waiting for a decision</small></article>
           <article class="stat"><span>Scheduled</span><strong id="stat-scheduled">—</strong><small>next 30 days</small></article>
@@ -262,7 +262,58 @@
       </section>
 
       <section id="settings-view" class="view">
-        <div class="section-intro"><div><h2>Channel setup</h2><p>These guardrails guide every agent in the pipeline.</p></div></div>
+        <div class="section-intro"><div><h2>Setup & controls</h2><p>Configure your channel, AI providers, narration, and YouTube connection from one place.</p></div></div>
+        <div class="setup-status-panel panel">
+          <div><p class="eyebrow">INTEGRATION STATUS</p><h2>Provider setup</h2><p id="configuration-restart-note" class="callout hidden">Saved changes take effect after restarting the application.</p></div>
+          <div id="configuration-status" class="integration-status-list"></div>
+        </div>
+        <form id="integrations-form" class="settings-form">
+          <div class="integrations-grid">
+            <article class="panel">
+              <div class="panel-heading"><div><p class="eyebrow">SCRIPTING & PLANNING</p><h2>AI text provider</h2></div></div>
+              <label><span>Provider</span><select name="textProvider" id="text-provider-select"></select></label>
+              <label id="text-model-select-wrap"><span>Model</span><select name="textModel" id="text-model-select"></select></label>
+              <label id="text-model-custom-wrap" class="hidden"><span>Model ID in your local server</span><input name="textModelCustom" id="text-model-custom" maxlength="200" placeholder="For example: qwen2.5-7b-instruct"></label>
+              <label id="local-model-url-wrap" class="hidden"><span>Local model server URL</span><input name="localBaseURL" id="local-model-url" type="url" placeholder="http://127.0.0.1:8080/v1"><small>Use an OpenAI-compatible llama.cpp server loading your .gguf model. Localhost only.</small></label>
+              <label><span>API key <small>(optional for local GGUF; leave blank to keep the saved key)</small></span><input name="textApiKey" type="password" autocomplete="new-password" placeholder="Saved keys are never displayed"></label>
+              <div class="form-actions"><button type="button" id="test-local-model" class="button secondary hidden">Test local model</button></div>
+            </article>
+            <article class="panel">
+              <div class="panel-heading"><div><p class="eyebrow">NARRATION</p><h2>Text-to-speech provider</h2></div></div>
+              <label><span>Provider</span><select name="ttsProvider" id="tts-provider-select"><option value="auto">Automatic · use an available provider</option><option value="voicebox">Voicebox · local</option><option value="elevenlabs">ElevenLabs</option><option value="openai">OpenAI</option><option value="gemini">Google Gemini</option></select></label>
+              <div id="voicebox-settings" class="provider-fields hidden">
+                <label><span>Voicebox server URL</span><input name="voiceboxBaseURL" type="url" placeholder="http://127.0.0.1:8000"></label>
+                <div class="form-grid two">
+                  <label><span>Voice profile</span><select name="voiceboxProfileId" id="voicebox-profile"><option value="">Enter profile ID or check server</option></select></label>
+                  <button type="button" id="check-voicebox" class="button secondary align-end">Find profiles</button>
+                </div>
+                <div class="form-grid two">
+                  <label><span>Engine <small>(optional)</small></span><input name="voiceboxEngine" placeholder="Use profile default"></label>
+                  <label><span>Model size <small>(optional)</small></span><input name="voiceboxModelSize" placeholder="Use profile default"></label>
+                  <label><span>Language</span><input name="voiceboxLanguage" maxlength="20" placeholder="en"></label>
+                  <label><span>Voice instructions <small>(optional)</small></span><input name="voiceboxInstruct" maxlength="500" placeholder="Use profile default"></label>
+                </div>
+              </div>
+              <div id="elevenlabs-settings" class="provider-fields hidden">
+                <label><span>ElevenLabs Voice ID</span><input name="elevenLabsVoiceId" autocomplete="off"></label>
+                <label><span>ElevenLabs API key <small>(leave blank to keep the saved key)</small></span><input name="elevenLabsApiKey" type="password" autocomplete="new-password" placeholder="Saved keys are never displayed"></label>
+              </div>
+              <div id="tts-api-key-wrap" class="provider-fields hidden">
+                <label><span>Provider API key <small>(leave blank to keep the saved key)</small></span><input name="ttsApiKey" type="password" autocomplete="new-password" placeholder="Saved keys are never displayed"></label>
+              </div>
+            </article>
+          </div>
+          <div class="form-actions"><button type="submit" class="button primary">Save provider settings</button></div>
+        </form>
+        <article class="panel youtube-setup-panel">
+          <div class="panel-heading"><div><p class="eyebrow">PUBLISHING & CHANNEL DATA</p><h2>YouTube connection</h2></div><span id="youtube-connection-status" class="status">Not connected</span></div>
+          <p>Use an OAuth client from Google Cloud Console with the YouTube Data API enabled. Your client secret and OAuth tokens are stored locally with owner-only permissions.</p>
+          <form id="youtube-connect-form" class="form-grid">
+            <label><span>OAuth client ID</span><input name="clientId" autocomplete="off" required></label>
+            <label><span>OAuth client secret <small>(leave blank to keep the saved secret)</small></span><input name="clientSecret" type="password" autocomplete="new-password"></label>
+            <div class="form-actions full-row"><button type="submit" class="button secondary">Save & connect YouTube</button><small id="youtube-auth-message">OAuth will open in your browser. Configure this app as a desktop/installed OAuth client.</small></div>
+          </form>
+        </article>
         <form id="profile-form" class="panel settings-form">
           <div class="form-grid">
             <label><span>Channel name</span><input name="channelName" maxlength="120" required></label>

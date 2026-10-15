@@ -826,6 +826,101 @@ function populateSettings(profile = {}, settings = {}, providers = []) {
       : selected?.available ? `${label(selected.id)} is configured (${selected.model}).` : `${label(videoMapping.videoProvider)} credentials are not configured.`;
 }
 
+function populateConfiguration(configuration = {}) {
+  const text = configuration.textProvider || {};
+  const providerSelect = $('#text-provider-select');
+  providerSelect.innerHTML = '<option value="">Select a provider</option>' + (text.providers || []).map(provider =>
+    `<option value="${escapeHTML(provider.id)}">${escapeHTML(provider.name)}${provider.configured ? ' · configured' : ''}</option>`
+  ).join('');
+  providerSelect.value = text.selected || '';
+  updateTextProviderFields(text);
+
+  const tts = configuration.tts || {};
+  $('#tts-provider-select').value = tts.selected || 'auto';
+  const form = $('#integrations-form');
+  const voicebox = tts.voicebox || {};
+  for (const [name, value] of Object.entries({
+    voiceboxBaseURL: voicebox.baseUrl,
+    voiceboxEngine: voicebox.engine,
+    voiceboxModelSize: voicebox.modelSize,
+    voiceboxLanguage: voicebox.language || 'en',
+    voiceboxInstruct: voicebox.instruct,
+    elevenLabsVoiceId: tts.elevenLabs?.voiceId
+  })) {
+    if (form.elements[name] && document.activeElement !== form.elements[name]) form.elements[name].value = value || '';
+  }
+  const profileSelect = $('#voicebox-profile');
+  if (voicebox.profileId && !Array.from(profileSelect.options).some(option => option.value === voicebox.profileId)) {
+    profileSelect.innerHTML = `<option value="${escapeHTML(voicebox.profileId)}">${escapeHTML(voicebox.profileId)} · saved profile</option>`;
+  }
+  if (voicebox.profileId && document.activeElement !== profileSelect) profileSelect.value = voicebox.profileId;
+  updateTTSFields();
+
+  const configured = tts.configured || {};
+  const statuses = [
+    ['AI text', text.providers?.find(provider => provider.id === text.selected)?.configured],
+    ['Voicebox', configured.voicebox],
+    ['ElevenLabs', configured.elevenlabs],
+    ['OpenAI TTS', configured.openai],
+    ['Gemini TTS', configured.gemini],
+    ['YouTube', configuration.youtube?.connected]
+  ];
+  $('#configuration-status').innerHTML = statuses.map(([name, ready]) =>
+    `<span class="integration-status-item ${ready ? 'ready' : ''}"><strong>${escapeHTML(name)}</strong> · ${ready ? 'ready' : 'not connected'}</span>`
+  ).join('');
+  $('#configuration-restart-note').classList.toggle('hidden', !configuration.restartRequired);
+
+  const youtube = configuration.youtube || {};
+  const status = $('#youtube-connection-status');
+  status.className = `status ${youtube.auth?.status === 'failed' ? 'failed' : youtube.connected || youtube.auth?.status === 'connected' ? 'passed' : youtube.auth?.status === 'pending' ? 'warning' : ''}`;
+  status.textContent = youtube.auth?.status === 'pending' ? 'Authorization in progress'
+    : youtube.auth?.status === 'failed' ? 'Authorization failed'
+      : youtube.connected ? 'Connected' : youtube.credentialsConfigured ? 'Credentials saved' : 'Not connected';
+  $('#youtube-auth-message').textContent = youtube.auth?.error
+    ? `Authorization failed: ${youtube.auth.error}`
+    : youtube.auth?.status === 'pending' ? 'Complete the authorization in the browser window that opened.'
+      : youtube.connected ? 'YouTube is authorized. Restart the application to activate the connection.'
+        : 'OAuth will open in your browser. Configure this app as a desktop/installed OAuth client.';
+}
+
+function updateTextProviderFields(providerConfiguration = ui.configuration?.textProvider || {}) {
+  const selected = $('#text-provider-select').value;
+  const local = selected === 'local';
+  const selectedProvider = providerConfiguration.providers?.find(provider => provider.id === selected);
+  const modelSelect = $('#text-model-select');
+  const modelSelectWrap = $('#text-model-select-wrap');
+  const customWrap = $('#text-model-custom-wrap');
+  modelSelectWrap.classList.toggle('hidden', local);
+  customWrap.classList.toggle('hidden', !local);
+  $('#local-model-url-wrap').classList.toggle('hidden', !local);
+  $('#test-local-model').classList.toggle('hidden', !local);
+  if (local) {
+    $('#local-model-url').value = providerConfiguration.localBaseUrl || $('#local-model-url').value || 'http://127.0.0.1:8080/v1';
+    $('#text-model-custom').value = providerConfiguration.localModel || $('#text-model-custom').value || '';
+    modelSelect.innerHTML = '';
+  } else if (selectedProvider) {
+    const models = selectedProvider.models || [];
+    modelSelect.innerHTML = models.map(model =>
+      `<option value="${escapeHTML(model)}">${escapeHTML(model)}</option>`
+    ).join('');
+    modelSelect.value = models.includes(providerConfiguration.model)
+      ? providerConfiguration.model : selectedProvider.defaultModel || models[0] || '';
+  }
+}
+
+function updateTTSFields() {
+  const selected = $('#tts-provider-select').value;
+  $('#voicebox-settings').classList.toggle('hidden', selected !== 'voicebox');
+  $('#elevenlabs-settings').classList.toggle('hidden', selected !== 'elevenlabs');
+  $('#tts-api-key-wrap').classList.toggle('hidden', !['openai', 'gemini'].includes(selected));
+}
+
+async function loadConfiguration() {
+  const response = await api('/api/configuration');
+  ui.configuration = response.result;
+  populateConfiguration(ui.configuration);
+}
+
 function switchView(view) {
   ui.currentView = view;
   $$('.nav-item').forEach(item => item.classList.toggle('active', item.dataset.view === view));
@@ -838,13 +933,14 @@ function switchView(view) {
     analytics: ['PERFORMANCE', 'Turn results into the next move.'],
     engagement: ['AUDIENCE ENGAGEMENT', 'Talk with the people watching.'],
     readiness: ['PRODUCTION READINESS', 'Verify before autonomy runs.'],
-    settings: ['CHANNEL GUARDRAILS', 'Make every agent sound like you.']
+    settings: ['SETUP & CONTROLS', 'Configure providers, channel guardrails, and access.']
   };
   $('#view-eyebrow').textContent = titles[view][0];
   $('#view-title').textContent = titles[view][1];
   location.hash = view;
   // Loaded on demand rather than in the 8-second dashboard poll to spare API quota.
   if (view === 'analytics') loadChannelSnapshot();
+  if (view === 'settings') loadConfiguration().catch(error => showToast(error.message, 'error'));
 }
 
 function selectOptions(options, selected) {
@@ -1788,6 +1884,112 @@ $('#profile-form').addEventListener('submit', async event => {
       video_max_generated_seconds: Number(values.videoMaxGeneratedSeconds)
     }, 'Operator settings saved.');
   } catch (_error) { /* toast already shown */ }
+});
+
+$('#text-provider-select').addEventListener('change', () => {
+  updateTextProviderFields(ui.configuration?.textProvider || {});
+});
+
+$('#tts-provider-select').addEventListener('change', updateTTSFields);
+
+$('#integrations-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const provider = $('#text-provider-select').value;
+  const values = Object.fromEntries(new FormData(form));
+  try {
+    const response = await api('/api/configuration', {
+      method: 'PUT',
+      body: JSON.stringify({
+        textProvider: {
+          provider,
+          model: provider === 'local' ? values.textModelCustom : values.textModel,
+          baseURL: values.localBaseURL,
+          apiKey: values.textApiKey
+        },
+        tts: {
+          provider: values.ttsProvider,
+          apiKey: values.ttsApiKey,
+          voicebox: {
+            baseUrl: values.voiceboxBaseURL,
+            profileId: values.voiceboxProfileId,
+            engine: values.voiceboxEngine,
+            modelSize: values.voiceboxModelSize,
+            language: values.voiceboxLanguage,
+            instruct: values.voiceboxInstruct
+          },
+          elevenLabs: {
+            apiKey: values.elevenLabsApiKey,
+            voiceId: values.elevenLabsVoiceId
+          }
+        }
+      })
+    });
+    showToast(response.result.message || 'Provider settings saved. Restart the application to apply them.');
+    form.elements.textApiKey.value = '';
+    form.elements.ttsApiKey.value = '';
+    form.elements.elevenLabsApiKey.value = '';
+    await loadConfiguration();
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+});
+
+$('#test-local-model').addEventListener('click', async () => {
+  try {
+    const response = await api('/api/configuration/local-model/check', {
+      method: 'POST',
+      body: JSON.stringify({
+        baseURL: $('#local-model-url').value,
+        model: $('#text-model-custom').value,
+        apiKey: $('#integrations-form').elements.textApiKey.value
+      })
+    });
+    showToast(response.result.message);
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+});
+
+$('#check-voicebox').addEventListener('click', async () => {
+  try {
+    const response = await api('/api/configuration/voicebox/check', {
+      method: 'POST',
+      body: JSON.stringify({ baseUrl: $('#integrations-form').elements.voiceboxBaseURL.value })
+    });
+    const select = $('#voicebox-profile');
+    const savedValue = select.value;
+    select.innerHTML = response.result.profiles.length
+      ? response.result.profiles.map(profile => {
+        const description = [profile.language, profile.engine].filter(Boolean).join(' · ');
+        return `<option value="${escapeHTML(profile.id)}">${escapeHTML(profile.name || profile.id)}${description ? ` · ${escapeHTML(description)}` : ''}</option>`;
+      }).join('')
+      : '<option value="">No profiles found</option>';
+    if (response.result.profiles.some(profile => profile.id === savedValue)) select.value = savedValue;
+    if (response.result.profiles.length) showToast(`Voicebox connected · ${response.result.profiles.length} profile(s) found.`);
+    else showToast('Voicebox is running, but it has no voice profiles.', 'error');
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+});
+
+$('#youtube-connect-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const values = Object.fromEntries(new FormData(event.currentTarget));
+  try {
+    const response = await api('/api/configuration/youtube/connect', {
+      method: 'POST',
+      body: JSON.stringify(values)
+    });
+    showToast(response.result.message);
+    for (let attempt = 0; attempt < 150; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      await loadConfiguration();
+      if (ui.configuration.youtube.auth?.status !== 'pending') break;
+    }
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
 });
 
 $('#api-key-button').addEventListener('click', () => {
