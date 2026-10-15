@@ -2,11 +2,13 @@ const OpenAI = require('openai');
 const Replicate = require('replicate');
 const fs = require('fs').promises;
 const path = require('path');
+const crypto = require('crypto');
 const axios = require('axios');
 const sharp = require('sharp');
 const { Logger } = require('./logger');
 const { runFFmpeg, getMediaDuration, checkFFmpeg, ffmpegInstallHint } = require('./ffmpeg');
 const { MediaGenerationService } = require('./media-generation-service');
+const { VoiceboxService, DEFAULT_VOICEBOX_URL } = require('./voicebox-service');
 
 const OPENAI_IMAGE_MODEL = 'gpt-image-2';
 
@@ -104,6 +106,17 @@ class AIVideoGenerator {
     this.elevenLabsApiKey = resolvedCredentials.elevenLabs?.apiKey || process.env.ELEVENLABS_API_KEY;
     this.elevenLabsVoiceId = resolvedCredentials.elevenLabs?.voiceId || process.env.ELEVENLABS_VOICE_ID;
     this.elevenLabsModel = process.env.ELEVENLABS_TTS_MODEL || 'eleven_v3';
+
+    const voicebox = resolvedCredentials.voicebox || {};
+    this.voiceboxBaseUrl = voicebox.baseUrl || process.env.VOICEBOX_BASE_URL || DEFAULT_VOICEBOX_URL;
+    this.voiceboxProfileId = voicebox.profileId || process.env.VOICEBOX_PROFILE_ID || null;
+    this.voiceboxEngine = voicebox.engine || process.env.VOICEBOX_ENGINE || null;
+    this.voiceboxModelSize = voicebox.modelSize || process.env.VOICEBOX_MODEL_SIZE || null;
+    this.voiceboxLanguage = voicebox.language || process.env.VOICEBOX_LANGUAGE || 'en';
+    this.voiceboxInstruct = voicebox.instruct || process.env.VOICEBOX_INSTRUCT || null;
+    this.voiceboxTimeoutMs = process.env.VOICEBOX_TIMEOUT_MS || 0;
+    this.ttsProvider = process.env.TTS_PROVIDER || resolvedCredentials.ttsProvider || null;
+    this.voicebox = null;
     
     // Azure Speech configuration
     this.azureSpeechKey = resolvedCredentials.azure?.speechKey || process.env.AZURE_SPEECH_KEY;
@@ -120,22 +133,10 @@ class AIVideoGenerator {
     let model = null;
 
     try {
-      let generatedPath;
-      if (this.elevenLabsApiKey && this.elevenLabsVoiceId) {
-        provider = 'elevenlabs';
-        model = this.elevenLabsModel;
-        generatedPath = await this.generateElevenLabsTTS(text, outputPath);
-      } else if (this.openai) {
-        provider = 'openai';
-        model = 'gpt-4o-mini-tts';
-        generatedPath = await this.generateOpenAITTS(text, outputPath);
-      } else if (this.gemini) {
-        provider = 'gemini';
-        model = process.env.GEMINI_TTS_MODEL || 'gemini-3.1-flash-tts-preview';
-        generatedPath = await this.generateGeminiTTS(text, outputPath);
-      } else {
-        generatedPath = await this.simulateTTSGeneration(text, outputPath);
-      }
+      const selected = this.selectTTSProvider();
+      provider = selected.provider;
+      model = selected.model;
+      const generatedPath = await selected.generate(text, outputPath);
 
       const usable = await this.isUsableAudioFile(generatedPath);
       this.lastNarrationResult = {
@@ -146,17 +147,103 @@ class AIVideoGenerator {
         externalTaskId: null,
         generatedAt: new Date().toISOString(),
         simulated: !usable,
-        cost: { provider, amount: null, currency: null, invoiceRequired: provider !== 'simulation' }
+        cost: { provider, amount: null, currency: null, invoiceRequired: !['simulation', 'voicebox'].includes(provider) }
       };
       return generatedPath;
     } catch (error) {
       this.lastNarrationResult = {
         status: 'failed', path: null, provider, model, externalTaskId: null,
         generatedAt: new Date().toISOString(), simulated: false, error: error.message,
-        cost: { provider, amount: null, currency: null, invoiceRequired: provider !== 'simulation' }
+        cost: { provider, amount: null, currency: null, invoiceRequired: !['simulation', 'voicebox'].includes(provider) }
       };
       this.logger.error('TTS generation failed:', error);
       throw error;
+    }
+  }
+
+  selectTTSProvider() {
+    const voiceboxConfigured = Boolean(this.voiceboxProfileId);
+    const providers = {
+      voicebox: {
+        configured: voiceboxConfigured,
+        model: this.voiceboxEngine || 'profile-default',
+        generate: (text, outputPath) => this.generateVoiceboxTTS(text, outputPath)
+      },
+      elevenlabs: {
+        configured: Boolean(this.elevenLabsApiKey && this.elevenLabsVoiceId),
+        model: this.elevenLabsModel,
+        generate: (text, outputPath) => this.generateElevenLabsTTS(text, outputPath)
+      },
+      openai: {
+        configured: Boolean(this.openai),
+        model: 'gpt-4o-mini-tts',
+        generate: (text, outputPath) => this.generateOpenAITTS(text, outputPath)
+      },
+      gemini: {
+        configured: Boolean(this.gemini),
+        model: process.env.GEMINI_TTS_MODEL || 'gemini-3.1-flash-tts-preview',
+        generate: (text, outputPath) => this.generateGeminiTTS(text, outputPath)
+      }
+    };
+
+    const selectedProvider = this.ttsProvider && this.ttsProvider !== 'auto'
+      ? this.ttsProvider
+      : null;
+    if (selectedProvider) {
+      const selected = providers[selectedProvider];
+      if (!selected) {
+        throw new Error(`Unsupported TTS_PROVIDER "${selectedProvider}". Choose voicebox, elevenlabs, openai, gemini, or auto.`);
+      }
+      if (!selected.configured) {
+        throw new Error(`TTS provider "${selectedProvider}" is selected but not configured.`);
+      }
+      return { provider: selectedProvider, ...selected };
+    }
+
+    for (const provider of ['voicebox', 'elevenlabs', 'openai', 'gemini']) {
+      if (providers[provider].configured) {
+        return { provider, ...providers[provider] };
+      }
+    }
+
+    return {
+      provider: 'simulation',
+      model: null,
+      generate: (text, outputPath) => this.simulateTTSGeneration(text, outputPath)
+    };
+  }
+
+  async generateVoiceboxTTS(text, outputPath) {
+    if (!this.voiceboxProfileId) {
+      throw new Error('Voicebox requires a voice profile. Run npm run walkthrough or set VOICEBOX_PROFILE_ID.');
+    }
+    this.voicebox ||= new VoiceboxService({
+      baseUrl: this.voiceboxBaseUrl,
+      timeoutMs: this.voiceboxTimeoutMs
+    });
+
+    const request = {
+      profile_id: this.voiceboxProfileId,
+      text,
+      language: this.voiceboxLanguage
+    };
+    if (this.voiceboxEngine) request.engine = this.voiceboxEngine;
+    if (this.voiceboxModelSize) request.model_size = this.voiceboxModelSize;
+    if (this.voiceboxInstruct) request.instruct = this.voiceboxInstruct;
+
+    const wavPath = `${outputPath}.${crypto.randomUUID()}.voicebox.wav`;
+    try {
+      const audio = await this.voicebox.generateSpeech(request);
+      await fs.writeFile(wavPath, audio);
+      await runFFmpeg([
+        '-y', '-i', wavPath,
+        '-codec:a', 'libmp3lame', '-q:a', '2',
+        outputPath
+      ]);
+      this.logger.info('Voicebox TTS generation complete');
+      return outputPath;
+    } finally {
+      await fs.unlink(wavPath).catch(() => {});
     }
   }
 

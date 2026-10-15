@@ -45,7 +45,7 @@ See the complete release history in [CHANGELOG.md](CHANGELOG.md).
 - **Self-hosted:** your credentials, media, and channel data stay under your control.
 - **Approval-first:** nothing is scheduled until quality, rights, and human-review gates pass by default.
 - **Strategy-driven:** give the Autonomous Channel Operator an objective, audience, pillars, cadence, and guardrails; it turns them into researched content plans and production runs.
-- **Provider-flexible:** use Gemini, OpenAI, OpenRouter, Kimi, MiMo, GLM, or another OpenAI-compatible text endpoint, plus Seedance, MiniMax H3, Gemini Omni Flash, Kling, Wan, or local FFmpeg for video.
+- **Provider-flexible:** use Anthropic Claude, Gemini, OpenAI, OpenRouter, Kimi, MiMo, GLM, or another OpenAI-compatible text endpoint, plus Seedance, MiniMax H3, Gemini Omni Flash, Kling, Wan, or local FFmpeg for video.
 - **Observable:** follow persistent generation jobs, failures, review state, publishing, and local activation milestones from the dashboard.
 
 <!-- Launch gate: add only a real 30–45 second dashboard demo captured from a verified end-to-end run. -->
@@ -63,6 +63,14 @@ npm start
 Open `http://localhost:3456`. The walkthrough explains each provider choice, tests credentials, and guides YouTube authorization.
 
 Already know what you are doing? `npm run setup` offers a shorter classic flow, and `.env.example` documents every setting.
+
+For direct Anthropic Claude access, choose **Anthropic Claude** in the walkthrough or set `ANTHROPIC_API_KEY` in `.env`. Claude handles text generation; configure Gemini or OpenAI separately if you also want AI-generated images or narration. Set `ANTHROPIC_MODEL` to override the default Claude model.
+
+### Local narration with Voicebox
+
+[Voicebox](https://docs.voicebox.sh/) is a self-hosted, open-source voice studio and local TTS alternative to ElevenLabs. Install and launch Voicebox, create a voice profile, then select **Voicebox** in `npm run walkthrough` or `npm run setup`. Setup checks the local Voicebox API and lets you choose a profile. Lumen sends narration to Voicebox's `POST /generate/stream` endpoint and converts the returned WAV audio to MP3 for video assembly. Voicebox performs synthesis locally; the first generation may take longer while its selected model is loaded or downloaded.
+
+For manual configuration, set `TTS_PROVIDER=voicebox`, `VOICEBOX_BASE_URL=http://127.0.0.1:8000`, and `VOICEBOX_PROFILE_ID` in `.env`. Optionally set `VOICEBOX_ENGINE`, `VOICEBOX_MODEL_SIZE`, `VOICEBOX_LANGUAGE`, and `VOICEBOX_INSTRUCT`; without an explicit engine, Voicebox uses the selected profile's default. Keep Voicebox's unauthenticated API bound to localhost; do not expose it directly to an untrusted network. Voicebox replaces narration only—OpenAI or Gemini is still needed for AI-generated images.
 
 ### Verify production readiness
 

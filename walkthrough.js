@@ -52,6 +52,22 @@ const AI_PROVIDER_GUIDE = {
     },
     validationCreds: (apiKey, model) => ({ aiProvider: { provider: 'openai', apiKey, model } })
   },
+  anthropic: {
+    label: 'Anthropic Claude — direct access to Claude models',
+    keyUrl: 'https://console.anthropic.com/settings/keys',
+    keyHint: 'from the Anthropic Console',
+    instructions: [
+      'Sign in to the Anthropic Console and set up API billing',
+      'Create an API key and copy it'
+    ],
+    models: [...PROVIDERS.anthropic.models],
+    defaultModel: PROVIDERS.anthropic.defaultModel,
+    covers: 'script and text generation (use Gemini or OpenAI for images and narration)',
+    save(credentials, apiKey, model) {
+      credentials.aiProvider = { provider: 'anthropic', apiKey, model };
+    },
+    validationCreds: (apiKey, model) => ({ aiProvider: { provider: 'anthropic', apiKey, model } })
+  },
   openrouter: {
     label: 'OpenRouter — one key, 400+ models (pay per use)',
     keyUrl: 'https://openrouter.ai/keys',
@@ -151,7 +167,7 @@ const VIDEO_PROVIDER_GUIDE = {
 class SetupWalkthrough {
   constructor() {
     this.cm = new CredentialManager();
-    this.totalSteps = 6;
+    this.totalSteps = 7;
   }
 
   header(step, title) {
@@ -183,6 +199,7 @@ class SetupWalkthrough {
     try {
       await this.stepSystemCheck();
       await this.stepAIProvider();
+      await this.stepVoicebox();
       await this.stepVideoProvider();
       await this.stepYouTube();
       await this.stepChannelBasics();
@@ -244,7 +261,7 @@ class SetupWalkthrough {
 
   // ── Step 2: AI provider ────────────────────────────────────────────────
   async stepAIProvider() {
-    this.header(2, 'Your AI provider (writes scripts, makes images & narration)');
+    this.header(2, 'Choose your AI provider');
 
     if (this.cm.hasAITextProvider()) {
       const { redo } = await inquirer.prompt([{
@@ -319,6 +336,23 @@ class SetupWalkthrough {
     }
   }
 
+  async stepVoicebox() {
+    this.header(3, 'Optional local narration with Voicebox');
+    console.log(chalk.white('Voicebox is a separate local voice studio with cloned voices and on-device TTS.'));
+    console.log(chalk.white('Start Voicebox and create a profile first. It needs no API key; Lumen connects to its local API.'));
+
+    const { configure } = await inquirer.prompt([{
+      type: 'confirm',
+      name: 'configure',
+      message: 'Configure Voicebox as your narration provider?',
+      default: Boolean(this.cm.credentials.voicebox?.profileId)
+    }]);
+    if (!configure) return;
+
+    await this.cm.setupVoiceboxCredentials();
+    console.log(chalk.green('  ✓ Voicebox will provide narration. Image generation still uses OpenAI or Gemini.'));
+  }
+
   async validateAIKey(guide, apiKey, model) {
     // Temporarily clear provider env keys so the test hits exactly the pasted key
     const envKeys = [...Object.values(PROVIDERS).map(p => p.envKey), 'GEMINI_API_KEY'];
@@ -347,7 +381,7 @@ class SetupWalkthrough {
   }
 
   async stepVideoProvider() {
-    this.header(3, 'Video generation provider');
+    this.header(4, 'Video generation provider');
     console.log(chalk.white('Long-form videos use hybrid assembly: selected AI clips plus local FFmpeg rendering.'));
     console.log(chalk.white('Local slideshow stays available and is the default so setup never spends credits unexpectedly.'));
     const { providerId } = await inquirer.prompt([{
@@ -388,7 +422,7 @@ class SetupWalkthrough {
 
   // ── Step 4: YouTube ────────────────────────────────────────────────────
   async stepYouTube() {
-    this.header(4, 'Connecting your YouTube channel');
+    this.header(5, 'Connecting your YouTube channel');
 
     if (this.cm.credentials.youtube && this.cm.tokens.youtube) {
       const { redo } = await inquirer.prompt([{
@@ -479,7 +513,7 @@ class SetupWalkthrough {
 
   // ── Step 5: channel basics ─────────────────────────────────────────────
   async stepChannelBasics() {
-    this.header(5, 'Channel & content basics');
+    this.header(6, 'Channel & content basics');
 
     const existing = this.cm.credentials.channel || {};
     const answers = await inquirer.prompt([
@@ -529,9 +563,9 @@ class SetupWalkthrough {
     console.log(chalk.gray('  set DEFAULT_PRIVACY_STATUS=public in .env when you\'re confident.'));
   }
 
-  // ── Step 6: summary ────────────────────────────────────────────────────
+  // ── Step 7: summary ────────────────────────────────────────────────────
   async stepFinish() {
-    this.header(6, 'All set — here\'s what your pipeline can do');
+    this.header(7, 'All set — here\'s what your pipeline can do');
 
     await this.cm.loadCredentials();
     await this.cm.loadTokens();
@@ -539,7 +573,16 @@ class SetupWalkthrough {
 
     const hasText = this.cm.hasAITextProvider();
     const hasGemini = Boolean(creds.gemini?.apiKey || process.env.GEMINI_API_KEY);
-    const hasMedia = Boolean(creds.openai?.apiKey || process.env.OPENAI_API_KEY || hasGemini);
+    const hasImages = Boolean(creds.openai?.apiKey || process.env.OPENAI_API_KEY || hasGemini);
+    const hasNarration = Boolean(
+      creds.voicebox?.profileId ||
+      process.env.VOICEBOX_PROFILE_ID ||
+      (creds.elevenLabs?.apiKey && creds.elevenLabs?.voiceId) ||
+      (process.env.ELEVENLABS_API_KEY && process.env.ELEVENLABS_VOICE_ID) ||
+      creds.openai?.apiKey ||
+      process.env.OPENAI_API_KEY ||
+      hasGemini
+    );
     const hasFFmpeg = await checkFFmpeg();
     const hasUpload = Boolean(creds.youtube && this.cm.tokens.youtube);
     const videoProviders = new VideoProviderRegistry(creds).list();
@@ -547,10 +590,11 @@ class SetupWalkthrough {
 
     const rows = [
       { ok: hasText, name: 'Write scripts & pick topics', fix: 'step 2 (AI provider)' },
-      { ok: hasMedia, name: 'Generate images & voice narration', fix: 'step 2 — use a Gemini or OpenAI key' },
+      { ok: hasNarration, name: 'Generate voice narration', fix: 'step 2 — use a Gemini or OpenAI key, or step 3 — configure Voicebox' },
+      { ok: hasImages, name: 'Generate AI images', fix: 'configure a Gemini or OpenAI key; built-in gradient visuals remain available' },
       { ok: hasFFmpeg, name: 'Assemble real .mp4 videos', fix: ffmpegInstallHint() },
-      { ok: hasVideoProvider, name: 'Generate AI video clips', fix: 'step 3 — or keep the local slideshow provider' },
-      { ok: hasUpload, name: 'Upload to YouTube', fix: 'step 4 (YouTube connection)' }
+      { ok: hasVideoProvider, name: 'Generate AI video clips', fix: 'step 4 — or keep the local slideshow provider' },
+      { ok: hasUpload, name: 'Upload to YouTube', fix: 'step 5 (YouTube connection)' }
     ];
 
     for (const row of rows) {

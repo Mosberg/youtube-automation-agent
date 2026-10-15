@@ -1,4 +1,5 @@
 const OpenAI = require('openai');
+const Anthropic = require('@anthropic-ai/sdk');
 const { Logger } = require('./logger');
 
 const GEMINI_MODELS = [
@@ -46,12 +47,21 @@ const PROVIDERS = {
     models: ['glm-5.3', 'glm-5.2', 'glm-5.1'],
     envKey: 'GLM_API_KEY',
   },
+  anthropic: {
+    name: 'Anthropic Claude',
+    defaultModel: 'claude-sonnet-5-5',
+    models: ['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-haiku-5-5', 'claude-fable-5-1'],
+    envKey: 'ANTHROPIC_API_KEY',
+    modelEnvKey: 'ANTHROPIC_MODEL',
+    api: 'anthropic',
+  },
 };
 
 class AITextService {
   constructor(credentials = {}) {
     this.logger = new Logger('AITextService');
     this.client = null;
+    this.anthropic = null;
     this.gemini = null;
     this.model = null;
     this.providerName = null;
@@ -65,13 +75,13 @@ class AITextService {
     const model = credentials.aiProvider?.model;
 
     if (provider && PROVIDERS[provider] && apiKey) {
-      return this._initOpenAICompatible(PROVIDERS[provider], apiKey, model);
+      return this._initProvider(PROVIDERS[provider], apiKey, model);
     }
 
     for (const [, preset] of Object.entries(PROVIDERS)) {
       const key = process.env[preset.envKey];
       if (key) {
-        return this._initOpenAICompatible(preset, key);
+        return this._initProvider(preset, key, preset.modelEnvKey && process.env[preset.modelEnvKey]);
       }
     }
 
@@ -81,6 +91,18 @@ class AITextService {
     }
 
     this.logger.warn('No AI text provider configured — text generation unavailable');
+  }
+
+  _initProvider(preset, apiKey, model) {
+    if (preset.api === 'anthropic') {
+      this.anthropic = new Anthropic({ apiKey });
+      this.model = model || preset.defaultModel;
+      this.providerName = preset.name;
+      this.logger.info(`${preset.name} initialized (model: ${this.model})`);
+      return;
+    }
+
+    this._initOpenAICompatible(preset, apiKey, model);
   }
 
   _initOpenAICompatible(preset, apiKey, model) {
@@ -132,6 +154,38 @@ class AITextService {
 
       if (!this._hasText(text)) {
         throw new Error(this._geminiEmptyResponseMessage(response));
+      }
+      return text;
+    }
+
+    if (this.anthropic) {
+      const request = {
+        model,
+        max_tokens: maxTokens,
+        messages: [{ role: 'user', content: prompt }],
+        temperature,
+      };
+
+      let response;
+      try {
+        response = await this.anthropic.messages.create(request);
+      } catch (error) {
+        const unsupportedTemperature =
+          error?.status === 400 &&
+          /temperature/i.test(error.message || '') &&
+          /(unsupported|not supported|not allowed|does not support|only the default|cannot be used)/i.test(error.message || '');
+        if (!unsupportedTemperature) throw error;
+
+        const { temperature: _temperature, ...withoutTemperature } = request;
+        response = await this.anthropic.messages.create(withoutTemperature);
+      }
+
+      const text = response?.content
+        ?.filter(block => block.type === 'text')
+        .map(block => block.text)
+        .join('');
+      if (!this._hasText(text)) {
+        throw new Error(`${this.providerName} returned an empty response. Check the API key and model quota.`);
       }
       return text;
     }
@@ -233,7 +287,7 @@ class AITextService {
   }
 
   isAvailable() {
-    return !!(this.client || this.gemini);
+    return !!(this.client || this.anthropic || this.gemini);
   }
 }
 

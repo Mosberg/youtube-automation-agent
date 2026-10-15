@@ -44,6 +44,8 @@ class SystemTest {
       { name: 'Publishing Safety', test: () => this.testPublishingSafety() },
       { name: 'Multi-Provider Credential Validation', test: () => this.testCredentialValidation() },
       { name: 'AI Text Service Token Compatibility', test: () => this.testAITextServiceTokenParams() },
+      { name: 'Anthropic Claude Messages API', test: () => this.testAnthropicTextService() },
+      { name: 'Voicebox Local TTS Integration', test: () => this.testVoiceboxTTS() },
       { name: 'Placeholder Scheduling Guard', test: () => this.testPlaceholderSchedulingGuard() },
       { name: 'FFmpeg Resolution', test: () => this.testFFmpegResolution() },
       { name: 'Gemini Media Provider Selection', test: () => this.testGeminiMediaProvider() },
@@ -1872,7 +1874,7 @@ class SystemTest {
           throw new Error('Discoverability review API did not persist the operator decision');
         }
       } finally {
-        await new Promise(resolve => server.close(resolve));
+        if (server.listening) await new Promise(resolve => server.close(resolve));
       }
 
       const unavailableService = new DiscoverabilityService(db, {
@@ -2579,6 +2581,11 @@ class SystemTest {
         throw new Error('OpenRouter configuration was incorrectly reported as missing credentials');
       }
 
+      manager.credentials = { youtube: { client_id: 'x' }, aiProvider: { provider: 'anthropic', apiKey: 'sk-ant-test' } };
+      if (manager.getMissingCredentials().length !== 0) {
+        throw new Error('Anthropic configuration was incorrectly reported as missing credentials');
+      }
+
       manager.credentials = { youtube: { client_id: 'x' } };
       const missingProvider = manager.getMissingCredentials();
       if (missingProvider.length !== 1 || !/AI provider/.test(missingProvider[0])) {
@@ -2727,6 +2734,84 @@ class SystemTest {
     }
 
     this.logger.info('AI text service token parameter test completed successfully');
+  }
+
+  async testAnthropicTextService() {
+    const { AITextService, PROVIDERS } = require('./utils/ai-text-service');
+    const service = new AITextService({
+      aiProvider: {
+        provider: 'anthropic',
+        apiKey: 'test-key',
+        model: PROVIDERS.anthropic.defaultModel
+      }
+    });
+
+    if (!service.isAvailable() || service.client || service.providerName !== 'Anthropic Claude') {
+      throw new Error('Anthropic credentials did not initialize the native Claude client');
+    }
+
+    const calls = [];
+    service.anthropic.messages.create = async params => {
+      calls.push(params);
+      return {
+        content: [
+          { type: 'thinking', thinking: 'internal reasoning' },
+          { type: 'text', text: 'Claude ' },
+          { type: 'text', text: 'response' }
+        ]
+      };
+    };
+
+    const reply = await service.generateText('test prompt', { maxTokens: 512, temperature: 0 });
+    if (reply !== 'Claude response') {
+      throw new Error(`Anthropic response text was not extracted correctly: ${reply}`);
+    }
+    if (
+      calls.length !== 1 ||
+      calls[0].model !== PROVIDERS.anthropic.defaultModel ||
+      calls[0].max_tokens !== 512 ||
+      calls[0].messages[0].content !== 'test prompt' ||
+      calls[0].temperature !== 0
+    ) {
+      throw new Error('Anthropic request did not use the Messages API parameters');
+    }
+
+    calls.length = 0;
+    service.anthropic.messages.create = async params => {
+      calls.push(params);
+      if (params.temperature !== undefined) {
+        const error = new Error('temperature is not supported with adaptive thinking');
+        error.status = 400;
+        throw error;
+      }
+      return { content: [{ type: 'text', text: 'retry succeeded' }] };
+    };
+    const retriedReply = await service.generateText('test prompt');
+    if (retriedReply !== 'retry succeeded' || calls.length !== 2 || 'temperature' in calls[1]) {
+      throw new Error('Anthropic unsupported-temperature response was not retried without temperature');
+    }
+
+    const envKeys = [...new Set([...Object.values(PROVIDERS).map(provider => provider.envKey), 'GEMINI_API_KEY', 'ANTHROPIC_MODEL'])];
+    const savedEnv = {};
+    for (const key of envKeys) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+    try {
+      process.env.ANTHROPIC_API_KEY = 'test-env-key';
+      process.env.ANTHROPIC_MODEL = 'claude-opus-5-5';
+      const envService = new AITextService();
+      if (!envService.isAvailable() || envService.model !== 'claude-opus-5-5') {
+        throw new Error('Anthropic environment credentials or model override were ignored');
+      }
+    } finally {
+      for (const key of envKeys) {
+        if (savedEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = savedEnv[key];
+      }
+    }
+
+    this.logger.info('Anthropic Claude Messages API test completed successfully');
   }
 
   async testPlaceholderSchedulingGuard() {
@@ -2890,6 +2975,187 @@ class SystemTest {
     }
 
     this.logger.info('Gemini media provider selection test completed successfully');
+  }
+
+  async testVoiceboxTTS() {
+    const { AIVideoGenerator } = require('./utils/ai-video-generator');
+    const { VoiceboxService, normalizeVoiceboxUrl } = require('./utils/voicebox-service');
+    const inquirer = require('inquirer');
+    const fs = require('fs').promises;
+    const http = require('http');
+    const os = require('os');
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'yaa-voicebox-'));
+    const envKeys = [
+      'TTS_PROVIDER',
+      'VOICEBOX_BASE_URL',
+      'VOICEBOX_PROFILE_ID',
+      'VOICEBOX_ENGINE',
+      'VOICEBOX_MODEL_SIZE',
+      'VOICEBOX_LANGUAGE',
+      'VOICEBOX_INSTRUCT',
+      'VOICEBOX_TIMEOUT_MS',
+      'OPENAI_API_KEY',
+      'GEMINI_API_KEY',
+      'ELEVENLABS_API_KEY',
+      'ELEVENLABS_VOICE_ID'
+    ];
+    const savedEnv = {};
+    for (const key of envKeys) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+
+    let generationRequest = null;
+    const audioBytes = Buffer.alloc(44 + 4800);
+    audioBytes.write('RIFF', 0);
+    audioBytes.writeUInt32LE(audioBytes.length - 8, 4);
+    audioBytes.write('WAVE', 8);
+    audioBytes.write('fmt ', 12);
+    audioBytes.writeUInt32LE(16, 16);
+    audioBytes.writeUInt16LE(1, 20);
+    audioBytes.writeUInt16LE(1, 22);
+    audioBytes.writeUInt32LE(24000, 24);
+    audioBytes.writeUInt32LE(48000, 28);
+    audioBytes.writeUInt16LE(2, 32);
+    audioBytes.writeUInt16LE(16, 34);
+    audioBytes.write('data', 36);
+    audioBytes.writeUInt32LE(audioBytes.length - 44, 40);
+
+    const server = http.createServer(async (request, response) => {
+      if (request.method === 'GET' && request.url === '/health') {
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify({ status: 'healthy' }));
+        return;
+      }
+      if (request.method === 'GET' && request.url === '/profiles') {
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify([{
+          id: 'profile-local',
+          name: 'Local narrator',
+          language: 'en',
+          default_engine: 'kokoro'
+        }]));
+        return;
+      }
+      if (request.method === 'POST' && request.url === '/generate/stream') {
+        const chunks = [];
+        for await (const chunk of request) chunks.push(chunk);
+        generationRequest = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        response.writeHead(200, {
+          'Content-Type': 'audio/wav',
+          'Content-Length': audioBytes.length
+        });
+        response.end(audioBytes);
+        return;
+      }
+      response.writeHead(404);
+      response.end();
+    });
+
+    try {
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+      const baseUrl = `http://127.0.0.1:${server.address().port}`;
+      const voicebox = new VoiceboxService({ baseUrl: `${baseUrl}/` });
+      const health = await voicebox.getHealth();
+      const profiles = await voicebox.listProfiles();
+      if (health.status !== 'healthy' || profiles[0]?.id !== 'profile-local') {
+        throw new Error('Voicebox health/profile discovery did not match the local API response');
+      }
+
+      if (normalizeVoiceboxUrl(baseUrl) !== baseUrl) {
+        throw new Error('Voicebox URL normalization changed a valid local API URL');
+      }
+      let invalidUrlRejected = false;
+      try {
+        normalizeVoiceboxUrl('file:///tmp/voicebox');
+      } catch (error) {
+        invalidUrlRejected = /HTTP or HTTPS/.test(error.message);
+      }
+      if (!invalidUrlRejected) throw new Error('A non-HTTP Voicebox URL was accepted');
+
+      const manager = new CredentialManager();
+      manager.saveCredentials = async () => {};
+      const originalPrompt = inquirer.prompt;
+      const promptAnswers = [
+        { baseUrl },
+        { profileId: 'profile-local', instruct: 'Warm and clear delivery.' }
+      ];
+      inquirer.prompt = async () => promptAnswers.shift();
+      try {
+        await manager.setupVoiceboxCredentials();
+      } finally {
+        inquirer.prompt = originalPrompt;
+      }
+      if (
+        manager.credentials.ttsProvider !== 'voicebox' ||
+        manager.credentials.voicebox?.profileId !== 'profile-local' ||
+        manager.credentials.voicebox?.engine !== 'kokoro' ||
+        manager.credentials.voicebox?.language !== 'en' ||
+        manager.credentials.voicebox?.instruct !== 'Warm and clear delivery.'
+      ) {
+        throw new Error('Voicebox setup did not save the selected profile and its default voice settings');
+      }
+
+      const generator = new AIVideoGenerator({
+        ...manager.credentials,
+        voicebox: { ...manager.credentials.voicebox, modelSize: '0.6B' }
+      });
+      const outputPath = path.join(directory, 'narration.mp3');
+      const generatedPath = await generator.generateTTSAudio('Voicebox integration test.', outputPath);
+      const outputStats = await fs.stat(outputPath);
+      if (
+        generatedPath !== outputPath ||
+        outputStats.size < 100 ||
+        generator.lastNarrationResult?.provider !== 'voicebox' ||
+        generator.lastNarrationResult?.status !== 'ready' ||
+        generator.lastNarrationResult?.simulated
+      ) {
+        throw new Error('Voicebox did not produce valid, recorded narration audio');
+      }
+      if (
+        generationRequest?.profile_id !== 'profile-local' ||
+        generationRequest.text !== 'Voicebox integration test.' ||
+        generationRequest.language !== 'en' ||
+        generationRequest.engine !== 'kokoro' ||
+        generationRequest.model_size !== '0.6B' ||
+        generationRequest.instruct !== 'Warm and clear delivery.'
+      ) {
+        throw new Error('Voicebox generation request did not include the selected profile and settings');
+      }
+      if (generator.lastNarrationResult.cost.invoiceRequired) {
+        throw new Error('Local Voicebox narration was incorrectly marked as requiring an external invoice');
+      }
+      if ((await fs.readdir(directory)).some(file => file.includes('.voicebox.wav'))) {
+        throw new Error('Temporary Voicebox WAV audio was not cleaned up');
+      }
+
+      process.env.TTS_PROVIDER = 'voicebox';
+      process.env.VOICEBOX_BASE_URL = baseUrl;
+      process.env.VOICEBOX_PROFILE_ID = 'profile-local';
+      process.env.VOICEBOX_ENGINE = 'kokoro';
+      process.env.VOICEBOX_LANGUAGE = 'en';
+      const envGenerator = new AIVideoGenerator({});
+      const envOutputPath = path.join(directory, 'environment-narration.mp3');
+      await envGenerator.generateTTSAudio('Environment configuration test.', envOutputPath);
+      if (
+        envGenerator.lastNarrationResult?.provider !== 'voicebox' ||
+        generationRequest?.text !== 'Environment configuration test.'
+      ) {
+        throw new Error('Voicebox environment configuration did not select the local TTS provider');
+      }
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+      for (const key of envKeys) {
+        if (savedEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = savedEnv[key];
+      }
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+
+    this.logger.info('Voicebox local TTS integration test completed successfully');
   }
 
   async testSlideshowRenderer() {

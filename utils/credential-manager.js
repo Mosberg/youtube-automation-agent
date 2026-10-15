@@ -5,6 +5,7 @@ const inquirer = require('inquirer');
 const chalk = require('chalk');
 const { Logger } = require('./logger');
 const { PROVIDERS, GEMINI_MODELS, GEMINI_DEFAULT_MODEL } = require('./ai-text-service');
+const { VoiceboxService, DEFAULT_VOICEBOX_URL } = require('./voicebox-service');
 
 // API keys and OAuth tokens are owner-only (0600). writeFile's mode applies only
 // when the file is created, so files written by older versions are tightened too.
@@ -196,6 +197,36 @@ class CredentialManager {
 
     await this.saveCredentials();
     console.log(chalk.green('✅ OpenAI credentials configured successfully!'));
+  }
+
+  async setupAnthropicCredentials() {
+    console.log(chalk.cyan('\nAnthropic Claude API Setup'));
+    console.log(chalk.gray('Get your API key from: https://console.anthropic.com/settings/keys'));
+
+    const answers = await inquirer.prompt([
+      {
+        type: 'password',
+        name: 'apiKey',
+        message: 'Enter your Anthropic API Key:',
+        validate: input => input.trim().length > 0 || 'API key is required'
+      },
+      {
+        type: 'list',
+        name: 'model',
+        message: 'Select your preferred Claude model:',
+        choices: [...PROVIDERS.anthropic.models],
+        default: PROVIDERS.anthropic.defaultModel
+      }
+    ]);
+
+    this.credentials.aiProvider = {
+      provider: 'anthropic',
+      apiKey: answers.apiKey.trim(),
+      model: answers.model
+    };
+
+    await this.saveCredentials();
+    console.log(chalk.green('✅ Anthropic Claude credentials configured successfully!'));
   }
 
   // Google Gemini API Setup
@@ -537,7 +568,7 @@ class CredentialManager {
     }
 
     if (!this.hasAITextProvider()) {
-      missing.push('an AI provider (OpenAI, Gemini, OpenRouter, Kimi, MiMo, or GLM)');
+      missing.push('an AI provider (OpenAI, Anthropic Claude, Gemini, OpenRouter, Kimi, MiMo, or GLM)');
     }
 
     return missing;
@@ -616,7 +647,7 @@ class CredentialManager {
 
     const setupSteps = [
       { name: '🎬 YouTube API', action: () => this.setupYouTubeCredentials() },
-      { name: '🤖 AI Service (OpenAI/Gemini)', action: () => this.setupAIService() },
+      { name: '🤖 AI Service (OpenAI/Claude/Gemini)', action: () => this.setupAIService() },
       { name: '🎙️  Text-to-Speech Service', action: () => this.setupTTSService() },
       { name: '📺 Channel Configuration', action: () => this.setupChannelConfig() },
       { name: '📝 Content Configuration', action: () => this.setupContentConfig() }
@@ -642,6 +673,7 @@ class CredentialManager {
         message: 'Select your preferred AI service:',
         choices: [
           { name: 'OpenAI (GPT-5.6)', value: 'openai' },
+          { name: 'Anthropic Claude', value: 'anthropic' },
           { name: 'Google Gemini (Gemini 3.7)', value: 'gemini' },
           { name: 'OpenRouter (400+ models, one API key)', value: 'openrouter' },
           { name: 'Kimi (Moonshot AI — K3)', value: 'kimi' },
@@ -653,6 +685,7 @@ class CredentialManager {
 
     switch (service) {
       case 'openai': return await this.setupOpenAICredentials();
+      case 'anthropic': return await this.setupAnthropicCredentials();
       case 'gemini': return await this.setupGeminiCredentials();
       case 'openrouter': return await this.setupOpenRouterCredentials();
       case 'kimi': return await this.setupKimiCredentials();
@@ -670,6 +703,7 @@ class CredentialManager {
         choices: [
           { name: 'OpenAI TTS (gpt-4o-mini-tts, uses your OpenAI key)', value: 'openai-tts' },
           { name: 'ElevenLabs (highest quality)', value: 'elevenlabs' },
+          { name: 'Voicebox (local, open-source voice studio)', value: 'voicebox' },
           { name: 'Azure Speech Services', value: 'azure' },
           { name: 'Skip TTS Setup', value: 'skip' }
         ]
@@ -677,12 +711,81 @@ class CredentialManager {
     ]);
 
     if (service === 'openai-tts') {
+      this.credentials.ttsProvider = 'openai';
+      await this.saveCredentials();
       console.log(chalk.green('✅ OpenAI TTS will use your existing OpenAI API key'));
     } else if (service === 'elevenlabs') {
       await this.setupElevenLabsCredentials();
+    } else if (service === 'voicebox') {
+      await this.setupVoiceboxCredentials();
     } else if (service === 'azure') {
       await this.setupAzureSpeechCredentials();
     }
+  }
+
+  async setupVoiceboxCredentials() {
+    console.log(chalk.cyan('\n🎙️  Voicebox Setup'));
+    console.log(chalk.gray('Start Voicebox and create a voice profile before continuing.'));
+    console.log(chalk.gray('Voicebox runs locally and keeps speech synthesis on your machine.'));
+
+    const { baseUrl } = await inquirer.prompt([{
+      type: 'input',
+      name: 'baseUrl',
+      message: 'Voicebox API URL:',
+      default: this.credentials.voicebox?.baseUrl || process.env.VOICEBOX_BASE_URL || DEFAULT_VOICEBOX_URL,
+      validate: input => {
+        try {
+          const url = new URL(input);
+          return ['http:', 'https:'].includes(url.protocol) || 'Use an HTTP or HTTPS URL';
+        } catch (error) {
+          return 'Enter a valid Voicebox URL';
+        }
+      }
+    }]);
+
+    const service = new VoiceboxService({ baseUrl });
+    const health = await service.getHealth();
+    if (health?.status !== 'healthy') {
+      throw new Error(`Voicebox health check failed at ${service.baseUrl}`);
+    }
+
+    const profiles = await service.listProfiles();
+    if (!profiles.length) {
+      throw new Error('Voicebox is running but has no voice profiles. Create a profile in Voicebox and run setup again.');
+    }
+
+    const choices = profiles.map(profile => ({
+      name: `${profile.name} (${profile.language}${profile.default_engine ? `, ${profile.default_engine}` : ''})`,
+      value: profile.id
+    }));
+    const { profileId, instruct } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'profileId',
+        message: 'Select the Voicebox profile for narration:',
+        choices,
+        default: this.credentials.voicebox?.profileId
+      },
+      {
+        type: 'input',
+        name: 'instruct',
+        message: 'Optional voice delivery instruction (leave empty for profile default):',
+        default: this.credentials.voicebox?.instruct || ''
+      }
+    ]);
+    const profile = profiles.find(item => item.id === profileId);
+
+    this.credentials.voicebox = {
+      baseUrl: service.baseUrl,
+      profileId,
+      ...(profile?.default_engine ? { engine: profile.default_engine } : {}),
+      ...(profile?.language ? { language: profile.language } : {}),
+      ...(instruct.trim() ? { instruct: instruct.trim() } : {})
+    };
+    this.credentials.ttsProvider = 'voicebox';
+
+    await this.saveCredentials();
+    console.log(chalk.green(`✅ Voicebox is ready with profile "${profile?.name || profileId}"`));
   }
 
   async setupElevenLabsCredentials() {
@@ -708,6 +811,7 @@ class CredentialManager {
       apiKey: answers.apiKey,
       voiceId: answers.voiceId
     };
+    this.credentials.ttsProvider = 'elevenlabs';
 
     await this.saveCredentials();
     console.log(chalk.green('✅ ElevenLabs credentials configured successfully!'));

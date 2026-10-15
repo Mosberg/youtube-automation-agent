@@ -21,6 +21,7 @@
     "lint": "eslint ."
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.134.0",
     "@google-cloud/local-auth": "^3.0.0",
     "@google/genai": "^2.9.0",
     "axios": "^1.7.0",
