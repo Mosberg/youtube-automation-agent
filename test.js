@@ -32,6 +32,8 @@ class SystemTest {
       { name: 'Scene-Aware Retention Studio', test: () => this.testSceneAwareRetentionStudio() },
       { name: 'Production Readiness Gate', test: () => this.testProductionReadinessGate() },
       { name: 'Durable Multi-Provider Video Generation', test: () => this.testVideoProviderLayer() },
+      { name: 'Configurable Video and Shorts Formats', test: () => this.testConfigurableGenerationFormats() },
+      { name: 'Free Local Artwork', test: () => this.testFreeLocalArtwork() },
       { name: 'Scene Repair Studio', test: () => this.testSceneRepairStudio() },
       { name: 'Narration Reliability and Recovery', test: () => this.testNarrationReliability() },
       { name: 'Shorts Repurposing Studio', test: () => this.testShortsRepurposingStudio() },
@@ -1530,7 +1532,7 @@ class SystemTest {
       const readiness = new ProductionReadinessService(db, { credentials: { comfyui: { apiKey: 'local-test-token' } } });
       const imageProbe = await readiness.probeImage(directory, true);
       const videoProbe = await readiness.probeVideoProvider(directory, false);
-      if (imageProbe.status !== 'skipped' || !/cloud image generation is not required/i.test(imageProbe.message) ||
+      if (imageProbe.status !== 'skipped' || !/separate image provider is not required/i.test(imageProbe.message) ||
           videoProbe.status !== 'skipped' || !/local live video probe was not requested/i.test(videoProbe.message)) {
         throw new Error('Readiness checks did not recognize ComfyUI as a local visual provider');
       }
@@ -1558,6 +1560,114 @@ class SystemTest {
       await fs.rm(directory, { recursive: true, force: true });
     }
     this.logger.info('Durable multi-provider video generation test completed successfully');
+  }
+
+  async testConfigurableGenerationFormats() {
+    const { YouTubeAutomationAgent } = require('./index');
+    const { ScriptWriterAgent } = require('./agents/script-writer-agent');
+    const { ShortsRepurposingService } = require('./utils/shorts-repurposing-service');
+    const { AIVideoGenerator } = require('./utils/ai-video-generator');
+    const pipeline = Object.create(YouTubeAutomationAgent.prototype);
+
+    const validShort = pipeline.validateGenerateRequestBody({
+      format: 'youtube_short', targetDuration: 180, style: 'activity'
+    });
+    const invalidShort = pipeline.validateGenerateRequestBody({
+      format: 'youtube_short', targetDuration: 181
+    });
+    const validLongVideo = pipeline.validateGenerateRequestBody({
+      format: 'video', targetDuration: 60, style: 'song'
+    });
+    const invalidVideo = pipeline.validateGenerateRequestBody({
+      format: 'video', targetDuration: 61
+    });
+    if (!validShort.valid || validShort.value.format !== 'youtube_short' ||
+        invalidShort.valid || !validLongVideo.valid || invalidVideo.valid) {
+      throw new Error('Generation format validation did not enforce configurable duration limits');
+    }
+
+    const defaultPipeline = Object.create(YouTubeAutomationAgent.prototype);
+    const createdJobs = [];
+    defaultPipeline.setupRequired = false;
+    defaultPipeline.agents = { strategy: {} };
+    defaultPipeline.activeJobs = new Map();
+    defaultPipeline.db = {
+      getAllSettings: async () => ({ default_video_minutes: '12', default_short_seconds: '60' }),
+      createGenerationJob: async input => {
+        createdJobs.push(input);
+        return { id: `default-${createdJobs.length}` };
+      }
+    };
+    defaultPipeline.runGenerationJob = async () => {};
+    defaultPipeline.logger = { error() {} };
+    const defaultVideoJob = await defaultPipeline.startGenerationJob({ format: 'video' });
+    await Promise.all([...defaultPipeline.activeJobs.values()]);
+    const defaultShortJob = await defaultPipeline.startGenerationJob({ format: 'youtube_short' });
+    await Promise.all([...defaultPipeline.activeJobs.values()]);
+    if (defaultVideoJob.id !== 'default-1' || defaultShortJob.id !== 'default-2' ||
+        createdJobs[0].targetDuration !== 12 || createdJobs[1].targetDuration !== 60) {
+      throw new Error('Generation jobs did not honor configured default video and Short lengths');
+    }
+
+    const writer = new ScriptWriterAgent({ saveScript: async () => {} }, {});
+    const shortScript = writer.applyRequestedDuration({}, {
+      outputFormat: 'youtube_short', aspectRatio: '9:16', targetDuration: 58
+    });
+    const videoScript = writer.applyRequestedDuration({}, {
+      outputFormat: 'video', aspectRatio: '16:9', targetDuration: 12
+    });
+    if (shortScript.duration !== '0:58' || shortScript.aspectRatio !== '9:16' ||
+        shortScript.targetDurationSeconds !== 58 || videoScript.duration !== '12:00') {
+      throw new Error('Script writer did not persist the requested runtime and video orientation');
+    }
+
+    const shorts = new ShortsRepurposingService({}, null);
+    const windows = shorts.selectWindows(Array.from({ length: 8 }, (_, index) => ({
+      duration: 20, label: `Scene ${index + 1}`
+    })), 2, 90);
+    if (windows.length !== 2 || windows.some(window => window.duration < 90 || window.duration > 180)) {
+      throw new Error('Short repurposing ignored the selected target duration');
+    }
+
+    const generator = new AIVideoGenerator({}, { db: null });
+    const verticalHtml = generator.createSlideshowHTML({ title: 'Vertical Short' }, [], { width: 1080, height: 1920 });
+    if (!verticalHtml.includes('width: 1080px') || !verticalHtml.includes('height: 1920px')) {
+      throw new Error('Slideshow renderer did not apply the vertical Shorts canvas dimensions');
+    }
+    this.logger.info('Configurable video and Shorts formats test completed successfully');
+  }
+
+  async testFreeLocalArtwork() {
+    const fs = require('fs').promises;
+    const os = require('os');
+    const sharp = require('sharp');
+    const { AIVideoGenerator } = require('./utils/ai-video-generator');
+    const { ThumbnailDesignerAgent } = require('./agents/thumbnail-designer-agent');
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'yaa-local-art-'));
+    const generator = new AIVideoGenerator({}, { db: null });
+    let generatedAssets = [];
+
+    try {
+      generatedAssets = await generator.generateLocalVisualAssets('<learn> a colorful moon', 'storybook', 2);
+      for (const asset of generatedAssets) {
+        const metadata = await sharp(asset).metadata();
+        if (metadata.format !== 'png' || metadata.width !== 1280 || metadata.height !== 720) {
+          throw new Error('Local visual artwork did not produce a real 1280x720 PNG');
+        }
+      }
+      const designer = new ThumbnailDesignerAgent({ saveThumbnail: async () => {} }, {}, { outputDir: directory });
+      designer.templatesPath = directory;
+      const thumbnail = await designer.generateThumbnail({ title: 'A bright learning adventure', metadata: { strategy: { contentType: 'Story' } } });
+      const metadata = await sharp(thumbnail.path).metadata();
+      if (metadata.format !== 'jpeg' || metadata.width !== 1280 || metadata.height !== 720 ||
+          !(await fs.stat(thumbnail.path)).size) {
+        throw new Error('Built-in local thumbnail designer did not output an optimized YouTube image');
+      }
+    } finally {
+      for (const asset of generatedAssets) await fs.unlink(asset).catch(() => {});
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+    this.logger.info('Free local artwork test completed successfully');
   }
 
   async testSceneRepairStudio() {
@@ -2523,7 +2633,10 @@ class SystemTest {
 
     const visualStyles = [];
     const productionAgent = Object.create(ProductionManagementAgent.prototype);
-    productionAgent.db = { getChannelProfile: async () => ({ visual_style: 'animated' }) };
+    productionAgent.db = {
+      getChannelProfile: async () => ({ visual_style: 'animated' }),
+      getAllSettings: async () => ({ image_generation_mode: 'cloud' })
+    };
     productionAgent.logger = this.logger;
     productionAgent.aiVideoGenerator = {
       generateVisualAssets: async (prompt, style) => {
@@ -2543,6 +2656,7 @@ class SystemTest {
     const pipeline = new YouTubeAutomationAgent();
     pipeline.db = {
       getChannelProfile: async () => ({}),
+      getAllSettings: async () => ({}),
       saveProductionData: async data => data.id,
       saveProductionSnapshot: async () => {},
       getSetting: async () => 'true',

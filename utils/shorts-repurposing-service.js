@@ -50,6 +50,7 @@ class ShortsRepurposingService {
     }
 
     const count = Math.round(clamp(input.count || 3, 1, 5));
+    const targetDuration = Math.round(clamp(input.targetDuration || 20, 15, 180));
     const sourceScenes = bundle.scenes || [];
     const scenes = sourceScenes.filter(scene =>
       scene.assetPath && scene.status === 'ready' &&
@@ -62,7 +63,7 @@ class ShortsRepurposingService {
     }
 
     const sourceTitle = bundle.editorData?.title || bundle.seo?.title || bundle.script?.title || bundle.strategy?.topic || 'Untitled video';
-    const windows = this.selectWindows(scenes, count);
+    const windows = this.selectWindows(scenes, count, targetDuration);
     const baseTime = this.nextPublishBase(bundle);
     const inheritedEvidence = this.inheritedEvidence(bundle);
     const clips = windows.map((window, position) => {
@@ -89,7 +90,7 @@ class ShortsRepurposingService {
     return this.db.replaceShortClips(productionId, clips);
   }
 
-  selectWindows(scenes, requestedCount) {
+  selectWindows(scenes, requestedCount, targetDuration = 20) {
     const timeline = [];
     let cursor = 0;
     for (const scene of scenes) {
@@ -106,13 +107,13 @@ class ShortsRepurposingService {
       const selected = [timeline[anchorIndex]];
       let total = selected[0].duration;
       let next = anchorIndex + 1;
-      while (total < 20 && next < timeline.length && total + timeline[next].duration <= 60) {
+      while (total < targetDuration && next < timeline.length && total + timeline[next].duration <= 180) {
         selected.push(timeline[next]);
         total += timeline[next].duration;
         next++;
       }
       let previous = anchorIndex - 1;
-      while (total < 15 && previous >= 0 && total + timeline[previous].duration <= 60) {
+      while (total < targetDuration && previous >= 0 && total + timeline[previous].duration <= 180) {
         selected.unshift(timeline[previous]);
         total += timeline[previous].duration;
         previous--;

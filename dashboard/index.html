@@ -371,7 +371,9 @@
         <form id="profile-form" class="panel settings-form">
           <div class="form-grid">
             <label><span>Channel name</span><input name="channelName" maxlength="120" required></label>
-            <label><span>Default format</span><select name="defaultStyle"><option value="explainer">Explainer</option><option value="tutorial">Tutorial</option><option value="list">List</option><option value="review">Review</option><option value="story">Story</option></select></label>
+            <label><span>Default format</span><select name="defaultStyle"><option value="explainer">Explainer</option><option value="tutorial">Tutorial</option><option value="list">List</option><option value="review">Review</option><option value="story">Story</option><option value="song">Original song / rhyme</option><option value="lookfind">Look &amp; find</option><option value="activity">Guided activity</option></select></label>
+            <label><span>Target age group</span><select name="targetAgeBand"><option value="general audience">General audience</option><option value="under 5">Under 5</option><option value="5-7">Ages 5–7</option><option value="8-12" selected>Ages 8–12</option><option value="13-17">Ages 13–17</option><option value="18+">Adults</option></select></label>
+            <label><span>Script language</span><input name="contentLanguage" maxlength="60" value="English" placeholder="English"></label>
             <label class="full-row"><span>Channel goal</span><textarea name="goal" rows="2"></textarea></label>
             <label class="full-row"><span>Target audience</span><textarea name="targetAudience" rows="2"></textarea></label>
             <label><span>Brand voice</span><input name="brandVoice" placeholder="Clear, credible, engaging"></label>
@@ -383,8 +385,14 @@
           <div class="settings-row">
             <label class="toggle"><input id="approval-required" type="checkbox"><span></span> Require approval before scheduling</label>
             <label class="toggle"><input id="notifications-enabled" type="checkbox"><span></span> Save operator notifications</label>
+            <label class="toggle"><input id="child-safe-mode" type="checkbox"><span></span> Child-safe scripts and examples</label>
           </div>
           <div class="form-grid video-provider-settings">
+            <label><span>Scene and thumbnail images</span><select name="imageGenerationMode"><option value="local">Free local artwork · no API</option><option value="cloud">Paid cloud image providers</option></select><small>Local mode creates designed SVG/PNG artwork and uses the built-in thumbnail renderer. ComfyUI video workflows need no separate image API.</small></label>
+            <label><span>Default video length <small>(minutes)</small></span><input name="defaultVideoMinutes" type="number" min="1" max="60" step="1" value="10"></label>
+            <label><span>Default Short length <small>(seconds)</small></span><input name="defaultShortSeconds" type="number" min="15" max="180" step="1" value="45"></label>
+            <label><span>Repurposed Shorts per video</span><input name="shortsDraftCount" type="number" min="1" max="5" step="1" value="3"></label>
+            <label><span>Repurposed Short target <small>(seconds)</small></span><input name="shortsTargetSeconds" type="number" min="15" max="180" step="1" value="20"></label>
             <label><span>Video provider</span><select name="videoProvider"><option value="slideshow">Local slideshow · no provider cost</option><option value="comfyui">ComfyUI · local video generation</option><option value="auto">Automatic capability routing</option><option value="seedance">ByteDance Seedance 2.5</option><option value="minimax_h3">MiniMax H3</option><option value="google_omni">Google Gemini Omni Flash</option><option value="kling">Kuaishou Kling 3.0 Omni</option><option value="wan">Alibaba Wan 2.7</option></select><small id="video-provider-status">Provider credentials are checked at runtime.</small></label>
             <label><span>Generation mode</span><select name="videoGenerationMode"><option value="hybrid">Hybrid · generated clips + local assembly</option><option value="slideshow">Local slideshow only</option></select></label>
             <label><span>Clip duration</span><input name="videoClipDuration" type="number" min="3" max="30" step="1"></label>
@@ -403,13 +411,14 @@
 
   <dialog id="generate-dialog" class="dialog">
     <form id="generate-form" method="dialog">
-      <div class="dialog-heading"><div><p class="eyebrow">NEW GENERATION JOB</p><h2>Create a video</h2></div><button type="button" class="close-button" data-close>×</button></div>
+      <div class="dialog-heading"><div><p class="eyebrow">NEW GENERATION JOB</p><h2>Create content</h2></div><button type="button" class="close-button" data-close>×</button></div>
       <label><span>Topic <small>optional—leave blank for agent selection</small></span><input name="topic" maxlength="200" placeholder="How small teams can automate repetitive work"></label>
       <div class="form-grid two">
-        <label><span>Format</span><select name="style"><option value="explainer">Explainer</option><option value="tutorial">Tutorial</option><option value="list">List</option><option value="review">Review</option><option value="story">Story</option></select></label>
-        <label><span>Length</span><select name="length"><option value="short">Short · 2–4 min</option><option value="medium" selected>Medium · 8–12 min</option><option value="long">Long · 15–20 min</option></select></label>
+        <label><span>Content type</span><select name="format" id="generation-format"><option value="video">YouTube video · 16:9</option><option value="youtube_short">YouTube Short · 9:16</option></select></label>
+        <label><span>Script style</span><select name="style"><option value="explainer">Explainer</option><option value="tutorial">Tutorial</option><option value="list">List</option><option value="review">Review</option><option value="story">Story</option><option value="song">Original song / rhyme</option><option value="lookfind">Look &amp; find</option><option value="activity">Guided activity</option></select></label>
       </div>
-      <p class="callout">Generation runs in the background. You can follow each stage and cancel between stages.</p>
+      <label><span id="generation-duration-label">Target length in minutes</span><input name="targetDuration" id="generation-target-duration" type="number" min="1" max="60" step="1" value="10" required><small>Scripts aim for this running time; final duration follows the narration track.</small></label>
+      <p class="callout">Generation runs in the background. Short scripts are capped at 3 minutes and rendered vertically; videos use landscape format. You can follow each stage and cancel between stages.</p>
       <div class="form-actions"><button type="submit" class="button primary">Start generation</button><button type="button" class="button ghost" data-close>Cancel</button></div>
     </form>
   </dialog>

@@ -15,6 +15,18 @@ class ScriptWriterAgent {
     return true;
   }
 
+  applyRequestedDuration(script, strategy) {
+    const isShort = strategy.outputFormat === 'youtube_short';
+    const targetSeconds = Number(strategy.targetDuration) * (isShort ? 1 : 60);
+    script.outputFormat = strategy.outputFormat || 'video';
+    script.aspectRatio = strategy.aspectRatio || (isShort ? '9:16' : '16:9');
+    if (Number.isFinite(targetSeconds) && targetSeconds > 0) {
+      script.targetDurationSeconds = targetSeconds;
+      script.duration = this.formatDuration(targetSeconds);
+    }
+    return script;
+  }
+
   loadTemplates() {
     return {
       tutorial: {
@@ -41,6 +53,21 @@ class ScriptWriterAgent {
         structure: ['hook', 'setup', 'conflict', 'journey', 'climax', 'resolution', 'lesson', 'cta'],
         tone: 'narrative',
         pacing: 'dynamic'
+      },
+      song: {
+        structure: ['hook', 'introduction', 'song_verses', 'summary', 'cta'],
+        tone: 'original, playful, and rhythmic',
+        pacing: 'steady and easy to follow'
+      },
+      lookfind: {
+        structure: ['hook', 'introduction', 'look_find', 'summary', 'cta'],
+        tone: 'curious and encouraging',
+        pacing: 'slow, with time for viewers to look'
+      },
+      activity: {
+        structure: ['hook', 'introduction', 'activity_steps', 'summary', 'cta'],
+        tone: 'warm and encouraging',
+        pacing: 'clear, with pauses for participation'
       }
     };
   }
@@ -52,6 +79,7 @@ class ScriptWriterAgent {
       const template = this.templates[strategy.contentType.toLowerCase()] || this.templates.explainer;
       const aiScript = await this.generateScriptWithAI(strategy, template);
       if (aiScript) {
+        this.applyRequestedDuration(aiScript, strategy);
         aiScript.fullScript = this.formatFullScript(aiScript);
         await this.db.saveScript(aiScript);
         this.logger.info(`Script generated with AI provider: ${aiScript.title}`);
@@ -87,6 +115,7 @@ class ScriptWriterAgent {
       };
 
       // Format for readability
+      this.applyRequestedDuration(script, strategy);
       script.fullScript = this.formatFullScript(script);
       
       // Save to database
@@ -125,6 +154,13 @@ Style/content type: ${strategy.contentType}
 Angle: ${strategy.angle}
 Target audience: ${strategy.targetAudience}
 Desired length: ${strategy.requestedLength || process.env.DEFAULT_VIDEO_LENGTH || '8-12 minutes'}
+Output format: ${strategy.outputFormat === 'youtube_short' ? 'vertical YouTube Short (9:16)' : 'standard YouTube video (16:9)'}
+Target audience age band: ${strategy.audienceAgeBand || 'general audience'}
+Language: ${strategy.contentLanguage || 'English'}
+${strategy.childSafeMode ? 'Use child-safe, age-appropriate language and examples. Avoid frightening, unsafe, or mature themes.' : ''}
+${strategy.outputFormat === 'youtube_short' ? 'Keep the complete spoken script within the requested Short duration. Use a fast hook, one self-contained idea, and a concise ending.' : ''}
+${strategy.contentType === 'Song' ? 'Write entirely original lyrics; do not imitate any existing song, artist, or copyrighted style.' : ''}
+${strategy.targetDuration ? `Aim for approximately ${Math.max(30, Math.round((strategy.outputFormat === 'youtube_short' ? strategy.targetDuration : strategy.targetDuration * 60) * 2.2))} spoken words.` : ''}
 Tone: ${template.tone}
 Pacing: ${template.pacing}
 Brand voice: ${strategy.brandVoice || 'clear, credible, and engaging'}
@@ -139,7 +175,9 @@ Avoid fabricated statistics, unsupported claims, and fake urgency. List every ex
 
     try {
       const response = await this.aiTextService.generateText(prompt, {
-        maxTokens: 1800,
+        maxTokens: strategy.targetDuration
+          ? Math.min(12000, Math.max(1800, Math.ceil(strategy.targetDuration * (strategy.outputFormat === 'youtube_short' ? 35 : 210))))
+          : 1800,
         temperature: 0.7
       });
       const parsed = this.parseAIJsonResponse(response);
@@ -161,6 +199,8 @@ Avoid fabricated statistics, unsupported claims, and fake urgency. List every ex
         conclusion: await this.generateConclusion(strategy),
         callToAction: this.normalizeAICTA(parsed.cta, strategy),
         duration: this.estimateDuration({ sections }),
+        outputFormat: strategy.outputFormat || 'video',
+        aspectRatio: strategy.aspectRatio || '16:9',
         tone: template.tone,
         pacing: template.pacing,
         keywords: strategy.keywords || [],
@@ -404,7 +444,10 @@ Avoid fabricated statistics, unsupported claims, and fake urgency. List every ex
       pros: () => this.generatePros(strategy),
       cons: () => this.generateCons(strategy),
       comparison: () => this.generateComparison(strategy),
-      implications: () => this.generateImplications(strategy)
+      implications: () => this.generateImplications(strategy),
+      song_verses: () => this.generateSongVerses(strategy),
+      look_find: () => this.generateLookFindActivity(strategy),
+      activity_steps: () => this.generateActivitySteps(strategy)
     };
 
     const generator = sectionGenerators[sectionType];
@@ -647,6 +690,48 @@ Avoid fabricated statistics, unsupported claims, and fake urgency. List every ex
       title: sectionType.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
       content: `This section covers important aspects of ${strategy.topic} that you need to know.`,
       duration: 60
+    };
+  }
+
+  async generateSongVerses(strategy) {
+    return {
+      type: 'song_verses',
+      title: `A song about ${strategy.topic}`,
+      content: [
+        `Let's learn about ${strategy.topic}, one small step at a time.`,
+        `Look and listen, try it out, and see what you can find.`,
+        `We can ask a question and explore the answer together.`,
+        `When we learn and practice, new ideas grow each day.`
+      ],
+      duration: 45
+    };
+  }
+
+  async generateLookFindActivity(strategy) {
+    return {
+      type: 'look_find',
+      title: `Look and find: ${strategy.topic}`,
+      content: [
+        `Take a slow look around this scene and find one thing connected to ${strategy.topic}.`,
+        `Pause for a moment and think about what you notice.`,
+        `Can you find one more detail? Tell someone what makes it interesting.`,
+        `There is no rush; careful looking helps us discover new things.`
+      ],
+      visuals: ['Large, uncluttered scene with a clear subject'],
+      duration: 60
+    };
+  }
+
+  async generateActivitySteps(strategy) {
+    return {
+      type: 'activity_steps',
+      title: `Try this activity: ${strategy.topic}`,
+      steps: [
+        { number: 1, title: 'Get ready', description: `Find a safe, everyday item to help explore ${strategy.topic}. Ask an adult for help when needed.` },
+        { number: 2, title: 'Try it', description: 'Follow one simple step, then pause and notice what happens.' },
+        { number: 3, title: 'Talk about it', description: 'Describe what you noticed and what you might try next.' }
+      ],
+      duration: 75
     };
   }
 

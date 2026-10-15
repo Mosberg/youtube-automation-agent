@@ -347,7 +347,7 @@ class AIVideoGenerator {
 
     try {
       if (!this.openai && !this.gemini) {
-        return await this.simulateVisualAssets(prompt, style, count);
+        return await this.generateLocalVisualAssets(prompt, style, count);
       }
 
       const enhancedPrompt = this.enhanceVisualPrompt(prompt, style);
@@ -362,9 +362,53 @@ class AIVideoGenerator {
       this.logger.info(`Generated ${localPaths.length} visual assets`);
       return localPaths;
     } catch (error) {
-      this.logger.error('Visual asset generation failed:', error);
-      return await this.simulateVisualAssets(prompt, style, count);
+      this.logger.warn(`Cloud visual generation failed; creating local artwork instead: ${error.message}`);
+      return this.generateLocalVisualAssets(prompt, style, count);
     }
+  }
+
+  async generateLocalVisualAssets(prompt, style = 'local-art', count = 1) {
+    await fs.mkdir(path.join(__dirname, '..', 'data', 'assets'), { recursive: true });
+    const palette = [
+      ['#101b3d', '#256d85', '#f7c873'],
+      ['#34205a', '#d5538a', '#f7d06b'],
+      ['#0c3b35', '#3e987a', '#f5d68a'],
+      ['#25315c', '#556fc4', '#f0a66a']
+    ];
+    const outputs = [];
+    const total = Math.max(1, Math.min(8, Math.floor(Number(count) || 1)));
+    const promptText = this.escapeSvgText(String(prompt || 'A new idea').replace(/\s+/g, ' ').slice(0, 95));
+    for (let index = 0; index < total; index++) {
+      const digest = crypto.createHash('sha256').update(`${prompt}:${style}:${index}`).digest();
+      const colors = palette[digest[0] % palette.length];
+      const x = 160 + digest[1] * 3;
+      const y = 100 + digest[2] * 2;
+      const radius = 90 + digest[3];
+      const assetPath = path.join(__dirname, '..', 'data', 'assets', `local_art_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.png`);
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+        <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="${colors[0]}"/><stop offset="1" stop-color="${colors[1]}"/></linearGradient>
+        <radialGradient id="glow"><stop stop-color="${colors[2]}" stop-opacity=".85"/><stop offset="1" stop-color="${colors[2]}" stop-opacity="0"/></radialGradient>
+        <filter id="blur"><feGaussianBlur stdDeviation="28"/></filter></defs>
+        <rect width="1280" height="720" fill="url(#bg)"/>
+        <circle cx="${x}" cy="${y}" r="${radius * 2}" fill="url(#glow)" opacity=".8"/>
+        <path d="M0 565 Q210 410 420 545 T850 510 T1280 520 V720 H0Z" fill="${colors[0]}" opacity=".58"/>
+        <circle cx="${900 - digest[4]}" cy="${180 + digest[5]}" r="${80 + digest[6]}" fill="${colors[2]}" opacity=".16" filter="url(#blur)"/>
+        <path d="M0 620 Q260 500 520 625 T1040 580 T1280 600" fill="none" stroke="${colors[2]}" stroke-opacity=".45" stroke-width="3"/>
+        <rect x="70" y="70" width="10" height="160" rx="5" fill="${colors[2]}"/>
+        <text x="112" y="112" fill="#fff" font-family="Arial,sans-serif" font-size="20" font-weight="700" letter-spacing="4">${this.escapeSvgText(String(style).toUpperCase().slice(0, 28))}</text>
+        <text x="112" y="170" fill="#fff" font-family="Arial,sans-serif" font-size="28" font-weight="700">${promptText}</text>
+        <text x="1190" y="660" text-anchor="end" fill="#fff" fill-opacity=".62" font-family="Arial,sans-serif" font-size="15" letter-spacing="3">LOCAL ARTWORK</text>
+      </svg>`;
+      await sharp(Buffer.from(svg)).png().toFile(assetPath);
+      outputs.push(assetPath);
+    }
+    return outputs;
+  }
+
+  escapeSvgText(value) {
+    return String(value).replace(/[&<>"']/g, character => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;'
+    })[character]);
   }
 
   async generateImage(prompt, imagePath) {
@@ -520,7 +564,8 @@ class AIVideoGenerator {
             visualAssets,
             audioPath,
             outputPath,
-            options.estimatedDuration || this.calculateScriptDuration(script)
+            options.estimatedDuration || this.calculateScriptDuration(script),
+            script.aspectRatio || generated.settings.aspectRatio
           );
           this.lastVideoResult = {
             requestedProvider: generated.requestedProvider,
@@ -583,7 +628,7 @@ class AIVideoGenerator {
     }
   }
 
-  async generateHybridVideo(clips, visualAssets, audioPath, outputPath, totalDuration) {
+  async generateHybridVideo(clips, visualAssets, audioPath, outputPath, totalDuration, aspectRatio = '16:9') {
     if (!(await checkFFmpeg())) throw new Error(ffmpegInstallHint());
     const validImages = await this.filterLocalImageAssets(visualAssets);
     const segments = clips.map(clip => ({ type: 'video', path: clip.path, duration: clip.duration }));
@@ -596,13 +641,17 @@ class AIVideoGenerator {
     if (!segments.length) throw new Error('No usable provider clips or still images were generated');
 
     const visualPath = outputPath.replace(/\.mp4$/i, '_hybrid_visual.mp4');
-    await this.renderMediaTimeline(segments, visualPath);
+    await this.renderMediaTimeline(segments, visualPath, aspectRatio);
     await this.addAudioToVideo(visualPath, audioPath, outputPath, { loopVideo: true });
     await fs.unlink(visualPath).catch(() => {});
     return outputPath;
   }
 
-  async renderMediaTimeline(segments, outputPath) {
+  async renderMediaTimeline(segments, outputPath, aspectRatio = '16:9') {
+    const [ratioWidth, ratioHeight] = String(aspectRatio).split(':').map(Number);
+    const vertical = ratioWidth > 0 && ratioHeight > ratioWidth;
+    const width = vertical ? 1080 : 1920;
+    const height = vertical ? 1920 : 1080;
     const args = ['-y'];
     for (const segment of segments) {
       const duration = Number(segment.duration).toFixed(2);
@@ -612,7 +661,7 @@ class AIVideoGenerator {
       else args.push('-stream_loop', '-1', '-t', duration, '-i', segment.path);
     }
     const filters = segments.map((segment, index) =>
-      `[${index}:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p,trim=duration=${Number(segment.duration).toFixed(2)},setpts=PTS-STARTPTS[v${index}]`
+      `[${index}:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p,trim=duration=${Number(segment.duration).toFixed(2)},setpts=PTS-STARTPTS[v${index}]`
     );
     filters.push(`${segments.map((_, index) => `[v${index}]`).join('')}concat=n=${segments.length}:v=1:a=0[vout]`);
     args.push('-filter_complex', filters.join(';'), '-map', '[vout]', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', outputPath);
@@ -678,11 +727,14 @@ class AIVideoGenerator {
 
     try {
       const page = await browser.newPage();
-      await page.setViewportSize({ width: 1920, height: 1080 });
+      const aspectRatio = script.aspectRatio || '16:9';
+      const vertical = aspectRatio === '9:16';
+      const dimensions = vertical ? { width: 1080, height: 1920 } : { width: 1920, height: 1080 };
+      await page.setViewportSize(dimensions);
 
       // Create HTML for slideshow (only real image files can be embedded)
       const imageAssets = await this.filterImageAssets(visualAssets);
-      await page.setContent(this.createSlideshowHTML(script, imageAssets));
+      await page.setContent(this.createSlideshowHTML(script, imageAssets, dimensions));
 
       // Freeze CSS transitions/animations so each still is captured fully rendered
       await page.addStyleTag({ content: '* { transition: none !important; animation: none !important; }' });
@@ -801,7 +853,7 @@ class AIVideoGenerator {
     return images;
   }
 
-  createSlideshowHTML(script, visualAssets) {
+  createSlideshowHTML(script, visualAssets, dimensions = { width: 1920, height: 1080 }) {
     return `
 <!DOCTYPE html>
 <html>
@@ -810,8 +862,8 @@ class AIVideoGenerator {
         body {
             margin: 0;
             padding: 0;
-            width: 1920px;
-            height: 1080px;
+            width: ${dimensions.width}px;
+            height: ${dimensions.height}px;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             font-family: 'Arial', sans-serif;
             overflow: hidden;
@@ -1137,23 +1189,8 @@ class AIVideoGenerator {
   }
 
   async simulateVisualAssets(prompt, style, count) {
-    this.logger.info(`Simulating ${count} visual assets...`);
-    
-    const paths = [];
-    for (let i = 0; i < count; i++) {
-      const assetPath = path.join(__dirname, '..', 'data', 'assets', `visual_sim_${Date.now()}_${i}.info`);
-      
-      await fs.writeFile(assetPath, JSON.stringify({
-        message: 'AI visual asset would be generated here',
-        prompt: prompt,
-        style: style,
-        timestamp: new Date().toISOString()
-      }, null, 2));
-      
-      paths.push(assetPath);
-    }
-    
-    return paths;
+    this.logger.info(`Creating ${count} local visual assets...`);
+    return this.generateLocalVisualAssets(prompt, style, count);
   }
 
   async simulateVideoGeneration(script, visualAssets, audioPath, outputPath) {

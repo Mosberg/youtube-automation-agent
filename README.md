@@ -44,6 +44,8 @@ See the complete release history in [CHANGELOG.md](CHANGELOG.md).
 
 - **Self-hosted:** your credentials, media, and channel data stay under your control.
 - **Approval-first:** nothing is scheduled until quality, rights, and human-review gates pass by default.
+- **Video and Shorts:** create landscape videos from 1–60 minutes or standalone vertical Shorts from 15–180 seconds; repurpose reviewed videos into configurable local vertical drafts with captions.
+- **Local-first artwork:** generate usable scene cards and thumbnails locally with Sharp/FFmpeg without image API keys; opt into cloud image generation or ComfyUI video workflows only when desired.
 - **Strategy-driven:** give the Autonomous Channel Operator an objective, audience, pillars, cadence, and guardrails; it turns them into researched content plans and production runs.
 - **Provider-flexible:** use Anthropic Claude, Gemini, OpenAI, OpenRouter, Kimi, MiMo, GLM, LM Studio, llama.cpp, or another OpenAI-compatible text endpoint, plus local ComfyUI workflows, Seedance, MiniMax H3, Gemini Omni Flash, Kling, Wan, or local FFmpeg for video.
 - **Observable:** follow persistent generation jobs, failures, review state, publishing, and local activation milestones from the dashboard.
@@ -316,6 +318,14 @@ Long-form productions use hybrid assembly: Lumen generates bounded provider clip
 Start ComfyUI on `http://127.0.0.1:8188`, build or load a text-to-video workflow with an MP4 video output node, then enable **Settings → Dev mode options** and choose **Save (API Format)**. In AgentTube, open **Settings → Channel setup**, select **ComfyUI · local video generation**, paste the workflow JSON, and replace the positive-prompt text with `{{PROMPT}}`. Optional `{{DURATION}}`, `{{FRAMES}}`, `{{WIDTH}}`, `{{HEIGHT}}`, and `{{SEED}}` placeholders are substituted as numbers when used as complete input values. Save settings and use **Test ComfyUI connection** before generating.
 
 The server URL must be loopback (`localhost`, `127.0.0.1`, or `::1`); the optional API token is saved in the local credentials file, not the settings database. The workflow and its models/nodes are supplied by the operator—AgentTube does not install or select ComfyUI models. Selecting ComfyUI skips paid cloud image generation and uses generated local clips with local FFmpeg assembly and narration. ComfyUI failures do not silently turn into a slideshow; the production is marked simulated and blocked from upload. Ensure the ComfyUI workflow saves MP4 video and that its duration/frame settings are compatible with the installed model.
+
+### Configurable videos, Shorts, and local artwork
+
+In **Create content**, select a standard 16:9 video and set its target from 1 to 60 minutes, or choose a 9:16 YouTube Short from 15 to 180 seconds. The requested duration is included in the script prompt, persisted with the generation job for recovery, and used for the output orientation; final runtime follows the narration track. Script formats include explainers, tutorials, lists, reviews, stories, original songs/rhymes, look-and-find episodes, and guided activities. Settings control the default lengths, script language, target age band, and child-safe prompt rules. The age-aware and child-safe defaults are intended for the referenced kids-channel workflow; review scripts and factual claims before publishing.
+
+Shorts Studio can also create a configurable number of excerpts from an approved long-form production. Choose the draft count and target duration in **Setup & settings**. Drafts are rendered locally as vertical MP4s with captions and blur, crop, or stacked layouts. Each Short retains separate review and scheduling gates and inherits source evidence and media-rights checks.
+
+**Free local artwork is the default.** The thumbnail designer creates a real 1280×720 image locally, while the scene-art generator produces prompt-labeled PNG cards for local slideshow assembly. These do not call an image API and are not photorealistic AI images. Select **Paid cloud image providers** only when you want remote image generation; the app uses a local artwork fallback if those requests fail. A ComfyUI text-to-video workflow is another local option for animated scene visuals.
 
 ## Configuration
 

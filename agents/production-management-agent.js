@@ -219,12 +219,15 @@ class ProductionManagementAgent {
   }
 
   async processThumbnail(thumbnail, script) {
-    if (await this.isComfyUISelected()) {
-      this.logger.info('ComfyUI selected; retaining the designed thumbnail without requesting cloud image generation.');
-    } else {
+    const settings = this.db?.getAllSettings ? await this.db.getAllSettings() : {};
+    const cloudImages = settings.image_generation_mode === 'cloud';
+    if (cloudImages && !(await this.isComfyUISelected())) {
       try {
         const thumbnailScript = thumbnail.script || script || { title: thumbnail.title || 'Untitled Video' };
         const aiThumbnail = await this.aiVideoGenerator.generateThumbnail(thumbnailScript, 'ethereal');
+        if (aiThumbnail.simulated || path.extname(aiThumbnail.path || '').toLowerCase() === '.info') {
+          throw new Error('Cloud thumbnail generation did not return a real image file');
+        }
         return {
           path: aiThumbnail.path,
           originalPath: thumbnail.path,
@@ -233,22 +236,30 @@ class ProductionManagementAgent {
           generatedWith: 'AI'
         };
       } catch (error) {
-        this.logger.error('AI thumbnail generation failed:', error);
+        this.logger.warn(`Cloud thumbnail generation failed; keeping the local thumbnail: ${error.message}`);
       }
     }
 
-    const productionThumbnailPath = path.join(__dirname, '..', 'data', 'assets', `thumbnail_${Date.now()}.jpg`);
-    if (thumbnail.path && await fs.access(thumbnail.path).then(() => true).catch(() => false)) {
-      const originalBuffer = await fs.readFile(thumbnail.path);
-      await fs.writeFile(productionThumbnailPath, originalBuffer);
-    } else {
-      await fs.writeFile(productionThumbnailPath + '.placeholder', 'Thumbnail placeholder');
+    if (thumbnail.path) {
+      try {
+        const stats = await fs.stat(thumbnail.path);
+        if (stats.isFile() && stats.size > 0) return { ...thumbnail, fileSize: stats.size, generatedWith: 'local-design' };
+      } catch (error) {
+        this.logger.warn(`Local thumbnail was unavailable; generating procedural artwork: ${error.message}`);
+      }
     }
+    const localAssets = await this.aiVideoGenerator.generateLocalVisualAssets(
+      `YouTube thumbnail for ${script?.title || thumbnail.title || 'new video'}`,
+      'thumbnail',
+      1
+    );
+    const productionThumbnailPath = localAssets[0];
     return {
       path: productionThumbnailPath,
       originalPath: thumbnail.path,
-      dimensions: thumbnail.dimensions || { width: 1792, height: 1024 },
-      fileSize: thumbnail.fileSize || 0
+      dimensions: { width: 1280, height: 720 },
+      fileSize: (await fs.stat(productionThumbnailPath)).size,
+      generatedWith: 'local-artwork'
     };
   }
 
@@ -308,8 +319,17 @@ class ProductionManagementAgent {
       const profile = await this.db.getChannelProfile?.() || {};
       const visualStyle = profile.visual_style || 'ethereal';
       const localComfy = await this.isComfyUISelected();
+      const appSettings = this.db?.getAllSettings
+        ? await this.db.getAllSettings()
+        : { image_generation_mode: 'cloud' };
       if (localComfy) {
-        this.logger.info('ComfyUI selected; using local text-to-video workflows without cloud image generation.');
+        this.logger.info('ComfyUI selected; using local text-to-video workflows without separate image generation.');
+      } else if (appSettings.image_generation_mode !== 'cloud') {
+        this.logger.info('Using free local procedural artwork for scene visuals.');
+        for (const prompt of visualPrompts) {
+          const assets = await this.aiVideoGenerator.generateLocalVisualAssets(prompt, visualStyle, 1);
+          visualAssets.push(...assets);
+        }
       } else {
         for (const prompt of visualPrompts) {
           const assets = await this.aiVideoGenerator.generateVisualAssets(prompt, visualStyle, 1);
@@ -592,7 +612,8 @@ class ProductionManagementAgent {
         {
           jobId: productionData.jobId,
           productionId: productionData.id,
-          estimatedDuration: productionData.estimatedDuration
+          estimatedDuration: productionData.estimatedDuration,
+          aspectRatio: productionData.script.aspectRatio || '16:9'
         }
       );
 
@@ -603,13 +624,15 @@ class ProductionManagementAgent {
 
       // Get file stats
       const stats = await fs.stat(finalVideoPath);
-      
+      const aspectRatio = productionData.script.aspectRatio || '16:9';
       productionData.assets.finalVideo = {
         path: finalVideoPath,
         fileSize: stats.size,
         duration: productionData.estimatedDuration,
         generatedWith: 'AI',
-        resolution: '1920x1080',
+        resolution: aspectRatio === '9:16' ? '1080x1920' : '1920x1080',
+        aspectRatio,
+        contentFormat: productionData.script.outputFormat || 'video',
         format: 'mp4',
         provider: this.aiVideoGenerator.lastVideoResult || { actualProvider: 'slideshow', model: 'local-ffmpeg' }
       };

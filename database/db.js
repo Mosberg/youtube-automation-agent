@@ -963,6 +963,8 @@ class Database {
     const id = this.generateId('job');
     const details = {
       strategyContext: input.strategyContext || {},
+      format: input.format || 'video',
+      targetDuration: input.targetDuration || null,
       resumeCount: 0,
       reusedStages: []
     };

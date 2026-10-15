@@ -263,7 +263,7 @@ class YouTubeAutomationAgent {
 
     const hasText = this.credentials.hasAITextProvider();
     const hasGemini = Boolean(creds.gemini?.apiKey || process.env.GEMINI_API_KEY);
-    const hasImages = Boolean(creds.openai?.apiKey || process.env.OPENAI_API_KEY || hasGemini);
+    const hasImages = true;
     const hasTTS = Boolean(
       creds.openai?.apiKey || process.env.OPENAI_API_KEY ||
       creds.elevenLabs?.apiKey || process.env.ELEVENLABS_API_KEY ||
@@ -276,7 +276,7 @@ class YouTubeAutomationAgent {
 
     const capabilities = [
       { name: 'Script & strategy generation', ok: hasText, hint: 'configure an AI provider (npm run credentials:setup)' },
-      { name: 'Image generation (visuals/thumbnails)', ok: hasImages, hint: 'requires an OpenAI or Gemini API key — otherwise gradient slides are used' },
+      { name: 'Image generation (visuals/thumbnails)', ok: hasImages, hint: 'built-in local artwork and thumbnail design work without cloud image API keys' },
       { name: 'Voice narration (TTS)', ok: hasTTS, hint: 'configure OpenAI, Gemini, ElevenLabs, or Azure Speech — otherwise videos are silent' },
       { name: 'Video assembly (FFmpeg)', ok: hasFFmpeg, hint: ffmpegInstallHint() },
       { name: 'YouTube upload', ok: hasUpload, hint: 'run: npm run credentials:setup' }
@@ -321,6 +321,8 @@ class YouTubeAutomationAgent {
       topic: null,
       style: null,
       length: typeof body.length === 'string' ? body.length.toLowerCase() : 'medium',
+      format: typeof body.format === 'string' ? body.format.toLowerCase() : 'video',
+      targetDuration: null,
       strategyContext: null
     };
 
@@ -350,6 +352,9 @@ class YouTubeAutomationAgent {
         'list',
         'review',
         'story',
+        'song',
+        'lookfind',
+        'activity',
         'educational',
         'informative',
         'engaging',
@@ -367,6 +372,20 @@ class YouTubeAutomationAgent {
 
     if (!['short', 'medium', 'long'].includes(value.length)) {
       return { valid: false, status: 400, error: 'length must be short, medium, or long' };
+    }
+
+    if (!['video', 'youtube_short'].includes(value.format)) {
+      return { valid: false, status: 400, error: 'format must be video or youtube_short' };
+    }
+    if (body.targetDuration !== undefined && body.targetDuration !== null && body.targetDuration !== '') {
+      const targetDuration = Number(body.targetDuration);
+      const minimum = value.format === 'youtube_short' ? 15 : 1;
+      const maximum = value.format === 'youtube_short' ? 180 : 60;
+      if (!Number.isInteger(targetDuration) || targetDuration < minimum || targetDuration > maximum) {
+        const unit = value.format === 'youtube_short' ? 'seconds' : 'minutes';
+        return { valid: false, status: 400, error: `targetDuration must be ${minimum}–${maximum} ${unit} for this format` };
+      }
+      value.targetDuration = targetDuration;
     }
 
     if (body.strategyContext !== undefined && body.strategyContext !== null) {
@@ -494,8 +513,8 @@ class YouTubeAutomationAgent {
           return res.status(validation.status).json({ success: false, error: validation.error });
         }
 
-        const { topic, style, length } = validation.value;
-        const result = await this.startGenerationJob({ topic, style, length, source: 'manual' });
+        const { topic, style, length, format, targetDuration } = validation.value;
+        const result = await this.startGenerationJob({ topic, style, length, format, targetDuration, source: 'manual' });
         res.status(202).json({ success: true, result });
       } catch (error) {
         res.status(error.status || 500).json({ success: false, error: error.message });
@@ -1645,6 +1664,8 @@ class YouTubeAutomationAgent {
         topic: bundle.strategy.topic || bundle.editorData.title || null,
         style: bundle.strategy.requestedStyle || bundle.strategy.contentType || null,
         length: bundle.strategy.requestedLengthKey || 'medium',
+        format: bundle.strategy.outputFormat || 'video',
+        targetDuration: bundle.strategy.targetDuration || null,
         source: 'retry'
       });
       return res.status(202).json({ success: true, result: job });
@@ -2040,7 +2061,11 @@ class YouTubeAutomationAgent {
     this.app.post('/api/ideas/:ideaId/generate', protect, async (req, res) => {
       const idea = await this.db.updateContentIdea(req.params.ideaId, { status: 'generating' });
       if (!idea) return res.status(404).json({ error: 'Idea not found' });
-      const job = await this.startGenerationJob({ topic: idea.topic, style: idea.style, length: req.body?.length || 'medium', source: 'idea' });
+      const job = await this.startGenerationJob({
+        topic: idea.topic, style: idea.style, length: req.body?.length || 'medium',
+        format: req.body?.format || 'video', targetDuration: req.body?.targetDuration,
+        source: 'idea'
+      });
       await this.db.updateContentIdea(idea.id, { status: 'generated' });
       return res.status(202).json({ success: true, result: job });
     });
@@ -2115,6 +2140,52 @@ class YouTubeAutomationAgent {
           return res.status(400).json({ error: 'Generated seconds cap must be between 0 and 600' });
         }
       }
+      const ageBands = new Set(['general audience', 'under 5', '5-7', '8-12', '13-17', '18+']);
+      const ageBand = req.body?.target_age_band;
+      if (ageBand !== undefined && !ageBands.has(ageBand)) {
+        return res.status(400).json({ error: 'Unsupported target age band' });
+      }
+      const contentLanguage = req.body?.content_language;
+      if (contentLanguage !== undefined &&
+          (typeof contentLanguage !== 'string' || !contentLanguage.trim() || contentLanguage.trim().length > 60)) {
+        return res.status(400).json({ error: 'Content language must be 1–60 characters' });
+      }
+      const childSafeMode = req.body?.child_safe_mode;
+      if (childSafeMode !== undefined && typeof childSafeMode !== 'boolean') {
+        return res.status(400).json({ error: 'child_safe_mode must be a boolean' });
+      }
+      const imageGenerationMode = req.body?.image_generation_mode;
+      if (imageGenerationMode !== undefined && !['local', 'cloud'].includes(imageGenerationMode)) {
+        return res.status(400).json({ error: 'Image generation mode must be local or cloud' });
+      }
+      let defaultVideoMinutes;
+      if (req.body?.default_video_minutes !== undefined) {
+        defaultVideoMinutes = Number(req.body.default_video_minutes);
+        if (!Number.isInteger(defaultVideoMinutes) || defaultVideoMinutes < 1 || defaultVideoMinutes > 60) {
+          return res.status(400).json({ error: 'Default video length must be between 1 and 60 minutes' });
+        }
+      }
+      let defaultShortSeconds;
+      if (req.body?.default_short_seconds !== undefined) {
+        defaultShortSeconds = Number(req.body.default_short_seconds);
+        if (!Number.isInteger(defaultShortSeconds) || defaultShortSeconds < 15 || defaultShortSeconds > 180) {
+          return res.status(400).json({ error: 'Default Short length must be between 15 and 180 seconds' });
+        }
+      }
+      let shortDraftCount;
+      if (req.body?.shorts_draft_count !== undefined) {
+        shortDraftCount = Number(req.body.shorts_draft_count);
+        if (!Number.isInteger(shortDraftCount) || shortDraftCount < 1 || shortDraftCount > 5) {
+          return res.status(400).json({ error: 'Short draft count must be between 1 and 5' });
+        }
+      }
+      let shortsTargetSeconds;
+      if (req.body?.shorts_target_seconds !== undefined) {
+        shortsTargetSeconds = Number(req.body.shorts_target_seconds);
+        if (!Number.isInteger(shortsTargetSeconds) || shortsTargetSeconds < 15 || shortsTargetSeconds > 180) {
+          return res.status(400).json({ error: 'Repurposed Short target must be between 15 and 180 seconds' });
+        }
+      }
       const allowed = ['approval_required', 'notification_enabled', 'channel_timezone', 'max_daily_posts', 'content_buffer_days'];
       for (const key of allowed) {
         if (req.body?.[key] !== undefined) await this.db.setSetting(key, String(req.body[key]));
@@ -2137,6 +2208,14 @@ class YouTubeAutomationAgent {
       }
       if (clipDuration !== undefined) await this.db.setSetting('video_clip_duration', String(clipDuration));
       if (maxGeneratedSeconds !== undefined) await this.db.setSetting('video_max_generated_seconds', String(maxGeneratedSeconds));
+      if (ageBand !== undefined) await this.db.setSetting('target_age_band', ageBand);
+      if (contentLanguage !== undefined) await this.db.setSetting('content_language', contentLanguage.trim());
+      if (childSafeMode !== undefined) await this.db.setSetting('child_safe_mode', String(childSafeMode));
+      if (imageGenerationMode !== undefined) await this.db.setSetting('image_generation_mode', imageGenerationMode);
+      if (defaultVideoMinutes !== undefined) await this.db.setSetting('default_video_minutes', String(defaultVideoMinutes));
+      if (defaultShortSeconds !== undefined) await this.db.setSetting('default_short_seconds', String(defaultShortSeconds));
+      if (shortDraftCount !== undefined) await this.db.setSetting('shorts_draft_count', String(shortDraftCount));
+      if (shortsTargetSeconds !== undefined) await this.db.setSetting('shorts_target_seconds', String(shortsTargetSeconds));
       return res.json({ success: true, result: await this.db.getAllSettings() });
     });
 
@@ -2201,8 +2280,14 @@ class YouTubeAutomationAgent {
       error.status = 429;
       throw error;
     }
-
-    const validation = this.validateGenerateRequestBody(input);
+    const savedSettings = await this.db.getAllSettings();
+    const request = { ...input };
+    if (request.targetDuration === undefined || request.targetDuration === null || request.targetDuration === '') {
+      request.targetDuration = request.format === 'youtube_short'
+        ? Number(savedSettings.default_short_seconds || 45)
+        : Number(savedSettings.default_video_minutes || 10);
+    }
+    const validation = this.validateGenerateRequestBody(request);
     if (!validation.valid) {
       const error = new Error(validation.error);
       error.status = validation.status;
@@ -2265,6 +2350,8 @@ class YouTubeAutomationAgent {
       topic: job.topic,
       style: job.style,
       length: job.length || 'medium',
+      format: job.details?.format || 'video',
+      targetDuration: job.details?.targetDuration || null,
       strategyContext: job.details?.strategyContext || {}
     };
     const updated = await this.db.updateGenerationJob(job.id, {
@@ -2316,7 +2403,9 @@ class YouTubeAutomationAgent {
       await this.db.updateGenerationJob(jobId, { status: 'running', progress: 2, error: null, completedAt: null });
       const result = await this.generateContent(input.topic, input.style, input.length, {
         jobId,
-        strategyContext: input.strategyContext
+        strategyContext: input.strategyContext,
+        format: input.format || 'video',
+        targetDuration: input.targetDuration || null
       });
       await this.db.updateGenerationJob(jobId, {
         status: 'completed',
@@ -2364,22 +2453,39 @@ class YouTubeAutomationAgent {
 
   async generateContent(topic = null, style = null, length = 'medium', options = {}) {
     this.logger.info('Starting content generation pipeline...');
-    const { jobId = null, strategyContext: rawStrategyContext = {} } = options;
+    const {
+      jobId = null,
+      strategyContext: rawStrategyContext = {},
+      format = 'video',
+      targetDuration = null
+    } = options;
     const strategyContext = rawStrategyContext || {};
     const profile = await this.db.getChannelProfile() || {};
+    const appSettings = await this.db.getAllSettings();
     const lengthLabels = { short: '2-4 minutes', medium: '8-12 minutes', long: '15-20 minutes' };
 
     // Step 1: Strategy
     const strategy = await this.runGenerationStage(jobId, 'strategy', 10, async () => {
       const generated = await this.agents.strategy.generateContentStrategy(topic);
-      const contentStyles = new Set(['tutorial', 'explainer', 'list', 'review', 'story']);
+      const contentStyles = new Set(['tutorial', 'explainer', 'list', 'review', 'story', 'song', 'lookfind', 'activity']);
       const requestedStyle = style || profile.default_style || null;
       if (requestedStyle && contentStyles.has(requestedStyle.toLowerCase())) {
         generated.contentType = requestedStyle.charAt(0).toUpperCase() + requestedStyle.slice(1).toLowerCase();
       }
       generated.requestedStyle = requestedStyle;
       generated.requestedLengthKey = length;
-      generated.requestedLength = lengthLabels[length] || lengthLabels.medium;
+      generated.outputFormat = format;
+      generated.targetDuration = targetDuration ||
+        (format === 'youtube_short' ? Number(appSettings.default_short_seconds || 45) : null);
+      generated.aspectRatio = format === 'youtube_short' ? '9:16' : '16:9';
+      generated.requestedLength = generated.targetDuration
+        ? format === 'youtube_short' ? `${generated.targetDuration} seconds (vertical YouTube Short)` : `${generated.targetDuration} minutes`
+        : lengthLabels[length] || lengthLabels.medium;
+      generated.audienceAgeBand = appSettings.target_age_band || process.env.TARGET_AGE_BAND || '8-12';
+      generated.contentLanguage = appSettings.content_language || process.env.CONTENT_LANGUAGE || 'English';
+      generated.childSafeMode = appSettings.child_safe_mode === undefined
+        ? process.env.CHILD_SAFE_MODE !== 'false'
+        : appSettings.child_safe_mode === 'true';
       generated.angle = strategyContext.angle || generated.angle;
       generated.planRationale = strategyContext.rationale || null;
       generated.targetAudience = strategyContext.audience || profile.target_audience || generated.targetAudience;

@@ -80,10 +80,12 @@ class MediaGenerationService {
 
   async generateClips({ jobId, productionId, script, visualAssets = [], outputDir }) {
     const settings = await this.settings();
+    const aspectRatio = script?.aspectRatio || settings.aspectRatio;
     const routingRequest = {
       duration: settings.clipDuration,
       firstFrame: visualAssets[0] || null,
-      generateAudio: settings.generateAudio
+      generateAudio: settings.generateAudio,
+      aspectRatio
     };
     const provider = this.registry.select(settings.provider, settings.order, routingRequest);
     const providerInfo = provider.describe();
@@ -96,7 +98,7 @@ class MediaGenerationService {
     }
 
     const normalized = provider.normalizeRequest(routingRequest);
-    const effectiveSettings = { ...settings, clipDuration: normalized.duration };
+    const effectiveSettings = { ...settings, clipDuration: normalized.duration, aspectRatio };
     const scenes = this.buildScenePlan(script, visualAssets, effectiveSettings);
     const clips = [];
     for (const scene of scenes) {
@@ -113,7 +115,7 @@ class MediaGenerationService {
           firstFrame: scene.firstFrame,
           referenceImages: scene.referenceImages,
           resolution: settings.resolution,
-          aspectRatio: settings.aspectRatio,
+          aspectRatio,
           generateAudio: settings.generateAudio
         }
       });

@@ -28,6 +28,21 @@ function readLMStudioDownloadJobs() {
   }
 }
 
+function syncGenerationFormat(resetValue = false) {
+  const form = $('#generate-form');
+  if (!form) return;
+  const short = form.elements.format.value === 'youtube_short';
+  const duration = form.elements.targetDuration;
+  $('#generation-duration-label').textContent = short ? 'Target length in seconds' : 'Target length in minutes';
+  duration.min = short ? '15' : '1';
+  duration.max = short ? '180' : '60';
+  if (resetValue || Number(duration.value) < Number(duration.min) || Number(duration.value) > Number(duration.max)) {
+    duration.value = short
+      ? duration.dataset.shortDefault || '45'
+      : duration.dataset.videoDefault || '10';
+  }
+}
+
 function escapeHTML(value) {
   return String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -57,6 +72,7 @@ async function api(url, options = {}, retry = true) {
       ...(options.headers || {})
     }
   });
+
   if (response.status === 401 && retry && requestApiKey() !== null) return api(url, options, false);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -827,11 +843,19 @@ function populateSettings(profile = {}, settings = {}, providers = []) {
   }
   $('#approval-required').checked = settings.approval_required !== 'false';
   $('#notifications-enabled').checked = settings.notification_enabled !== 'false';
+  $('#child-safe-mode').checked = settings.child_safe_mode !== 'false';
+  if (form.elements.targetAgeBand) form.elements.targetAgeBand.value = settings.target_age_band || '8-12';
+  if (form.elements.contentLanguage) form.elements.contentLanguage.value = settings.content_language || 'English';
   const videoMapping = {
     videoProvider: settings.video_provider || 'slideshow',
     videoGenerationMode: settings.video_generation_mode || 'hybrid',
     videoClipDuration: settings.video_clip_duration || '8',
     videoMaxGeneratedSeconds: settings.video_max_generated_seconds || '60',
+    imageGenerationMode: settings.image_generation_mode || 'local',
+    defaultVideoMinutes: settings.default_video_minutes || '10',
+    defaultShortSeconds: settings.default_short_seconds || '45',
+    shortsDraftCount: settings.shorts_draft_count || '3',
+    shortsTargetSeconds: settings.shorts_target_seconds || '20',
     comfyuiBaseURL: settings.comfyui_base_url || 'http://127.0.0.1:8188',
     comfyuiFrameRate: settings.comfyui_frame_rate || '24',
     comfyuiWorkflow: settings.comfyui_workflow
@@ -841,6 +865,10 @@ function populateSettings(profile = {}, settings = {}, providers = []) {
   for (const [name, value] of Object.entries(videoMapping)) {
     if (form.elements[name] && document.activeElement !== form.elements[name]) form.elements[name].value = value;
   }
+  const generationForm = $('#generate-form');
+  generationForm.elements.targetDuration.dataset.videoDefault = videoMapping.defaultVideoMinutes;
+  generationForm.elements.targetDuration.dataset.shortDefault = videoMapping.defaultShortSeconds;
+  syncGenerationFormat();
   const selected = providers.find(provider => provider.id === videoMapping.videoProvider);
   $('#video-provider-status').textContent = videoMapping.videoProvider === 'auto'
     ? `${providers.filter(provider => provider.available && provider.id !== 'slideshow').length} paid provider(s) available; local slideshow remains the final fallback.`
@@ -1419,11 +1447,13 @@ function renderSceneEditor(item, canReview = true) {
 function renderShortsStudio(item) {
   if (!item.assets?.finalVideo?.path || item.assets.finalVideo.simulated) return '';
   const clips = item.shorts || [];
+  const draftCount = Number(ui.state?.settings?.shorts_draft_count || 3);
+  const targetSeconds = Number(ui.state?.settings?.shorts_target_seconds || 20);
   const parentApproved = item.review_status === 'approved';
   return `<section class="shorts-studio">
     <div class="panel-heading shorts-heading">
       <div><p class="eyebrow">SHORTS REPURPOSING STUDIO</p><h3>Turn one production into vertical reach</h3><p>Create local 9:16 excerpts with mobile captions. Drafts inherit the source production's evidence and still require separate approval.</p></div>
-      <button type="button" class="button secondary small" data-propose-shorts="${escapeHTML(item.id)}">${clips.length ? 'Refresh drafts' : 'Create 3 Short drafts'}</button>
+      <button type="button" class="button secondary small" data-propose-shorts="${escapeHTML(item.id)}" data-count="${draftCount}" data-target-seconds="${targetSeconds}">${clips.length ? 'Refresh drafts' : `Create ${draftCount} Short drafts`}</button>
     </div>
     <div class="shorts-evidence ${parentApproved ? 'ready' : ''}">
       <span>${parentApproved ? '✓ Source production approved' : 'Source approval required before scheduling'}</span>
@@ -1803,9 +1833,13 @@ document.addEventListener('click', async event => {
     if (replacing && !confirm('Replace the current editable Short drafts? Rendered draft files will remain on disk but their manifest will be replaced.')) return;
     try {
       await api(`/api/content/${encodeURIComponent(productionId)}/shorts/propose`, {
-        method: 'POST', body: JSON.stringify({ count: 3, replace: replacing })
+        method: 'POST', body: JSON.stringify({
+          count: Number(proposeShorts.dataset.count || 3),
+          targetDuration: Number(proposeShorts.dataset.targetSeconds || 20),
+          replace: replacing
+        })
       });
-      await refreshContentDialog(productionId, 'Three local Short drafts created from the current scene timeline.');
+      await refreshContentDialog(productionId, 'Local Short drafts created from the current scene timeline.');
     } catch (error) {
       showToast(error.message, 'error');
     }
@@ -2094,6 +2128,7 @@ document.addEventListener('change', event => {
 });
 
 $('#generate-button').addEventListener('click', () => $('#generate-dialog').showModal());
+$('#generation-format').addEventListener('change', () => syncGenerationFormat(true));
 $('#add-idea-button').addEventListener('click', () => $('#idea-dialog').showModal());
 $('#refresh-button').addEventListener('click', () => refreshDashboard());
 $('#channel-snapshot-refresh').addEventListener('click', () => loadChannelSnapshot(true));
@@ -2177,6 +2212,7 @@ $('#resume-operator-run').addEventListener('click', async event => {
 $('#generate-form').addEventListener('submit', async event => {
   event.preventDefault();
   const values = Object.fromEntries(new FormData(event.currentTarget));
+  values.targetDuration = Number(values.targetDuration);
   try {
     await mutate('/generate', 'POST', { ...values, topic: values.topic.trim() || null }, 'Generation job started.');
     $('#generate-dialog').close();
@@ -2208,6 +2244,14 @@ $('#profile-form').addEventListener('submit', async event => {
       video_generation_mode: values.videoGenerationMode,
       video_clip_duration: Number(values.videoClipDuration),
       video_max_generated_seconds: Number(values.videoMaxGeneratedSeconds),
+      image_generation_mode: values.imageGenerationMode,
+      target_age_band: values.targetAgeBand,
+      content_language: values.contentLanguage,
+      child_safe_mode: $('#child-safe-mode').checked,
+      default_video_minutes: Number(values.defaultVideoMinutes),
+      default_short_seconds: Number(values.defaultShortSeconds),
+      shorts_draft_count: Number(values.shortsDraftCount),
+      shorts_target_seconds: Number(values.shortsTargetSeconds),
       comfyui_base_url: values.comfyuiBaseURL,
       comfyui_frame_rate: Number(values.comfyuiFrameRate),
       comfyui_workflow: values.comfyuiWorkflow,

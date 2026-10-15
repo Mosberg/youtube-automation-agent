@@ -151,11 +151,18 @@ class ProductionReadinessService {
     const selectedVideoProvider = media.registry.select(videoSettings.provider, videoSettings.order, {
       duration: videoSettings.clipDuration
     });
+    const settings = await this.db.getAllSettings();
     if (videoSettings.provider === 'comfyui' || selectedVideoProvider.id === 'comfyui') {
       return {
         status: 'skipped',
-        message: 'ComfyUI is selected; generated local video supplies the visuals, so cloud image generation is not required.',
+        message: 'ComfyUI is selected; local video workflows supply the visuals, so a separate image provider is not required.',
         details: { provider: 'comfyui' }
+      };
+    }
+    if (settings.image_generation_mode !== 'cloud') {
+      return {
+        message: 'Free local artwork and the built-in thumbnail renderer are selected; no cloud image provider is required.',
+        details: { provider: 'local-artwork' }
       };
     }
     const generator = new AIVideoGenerator(this.credentialManager.credentials || {});

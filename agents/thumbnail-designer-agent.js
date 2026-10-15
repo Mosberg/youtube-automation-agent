@@ -4,11 +4,12 @@ const fs = require('fs').promises;
 const { Logger } = require('../utils/logger');
 
 class ThumbnailDesignerAgent {
-  constructor(db, credentials) {
+  constructor(db, credentials, options = {}) {
     this.db = db;
     this.credentials = credentials;
     this.logger = new Logger('ThumbnailDesigner');
     this.templatesPath = path.join(__dirname, '..', 'data', 'thumbnail-templates');
+    this.outputDir = options.outputDir || path.join(__dirname, '..', 'uploads', 'thumbnails');
   }
 
   async initialize() {
@@ -20,7 +21,7 @@ class ThumbnailDesignerAgent {
   async ensureTemplatesDirectory() {
     try {
       await fs.mkdir(this.templatesPath, { recursive: true });
-      await fs.mkdir(path.join(__dirname, '..', 'uploads', 'thumbnails'), { recursive: true });
+      await fs.mkdir(this.outputDir, { recursive: true });
     } catch (error) {
       this.logger.error('Failed to create directories:', error);
     }
@@ -209,7 +210,7 @@ class ThumbnailDesignerAgent {
     const height = 720;
     
     const marker = suffix ? `_${suffix}` : '';
-    const outputPath = path.join(__dirname, '..', 'uploads', 'thumbnails', `thumbnail${marker}_${Date.now()}.png`);
+    const outputPath = path.join(this.outputDir, `thumbnail${marker}_${Date.now()}.png`);
     
     // Create gradient background
     const svg = `
@@ -253,7 +254,7 @@ class ThumbnailDesignerAgent {
 
   async addTextOverlay(imagePath, concept, suffix = '') {
     const marker = suffix ? `_${suffix}` : '';
-    const outputPath = path.join(__dirname, '..', 'uploads', 'thumbnails', `thumbnail_final${marker}_${Date.now()}.png`);
+    const outputPath = path.join(this.outputDir, `thumbnail_final${marker}_${Date.now()}.png`);
     
     // Create text overlay SVG
     const textSvg = `
@@ -280,12 +281,12 @@ class ThumbnailDesignerAgent {
         </style>
         
         <!-- Shadow -->
-        <text x="642" y="302" class="primary shadow">${concept.primaryText}</text>
-        <text x="642" y="402" class="secondary shadow">${concept.secondaryText}</text>
+        <text x="642" y="302" class="primary shadow">${this.escapeXML(concept.primaryText)}</text>
+        <text x="642" y="402" class="secondary shadow">${this.escapeXML(concept.secondaryText)}</text>
         
         <!-- Main text -->
-        <text x="640" y="300" class="primary">${concept.primaryText}</text>
-        <text x="640" y="400" class="secondary">${concept.secondaryText}</text>
+        <text x="640" y="300" class="primary">${this.escapeXML(concept.primaryText)}</text>
+        <text x="640" y="400" class="secondary">${this.escapeXML(concept.secondaryText)}</text>
       </svg>
     `;
     
@@ -302,9 +303,15 @@ class ThumbnailDesignerAgent {
     return outputPath;
   }
 
+  escapeXML(value) {
+    return String(value).replace(/[&<>"']/g, character => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;'
+    })[character]);
+  }
+
   async optimizeForYouTube(imagePath, suffix = '') {
     const marker = suffix ? `_${suffix}` : '';
-    const outputPath = path.join(__dirname, '..', 'uploads', 'thumbnails', `thumbnail_optimized${marker}_${Date.now()}.jpg`);
+    const outputPath = path.join(this.outputDir, `thumbnail_optimized${marker}_${Date.now()}.jpg`);
     
     // YouTube optimization: JPEG format, proper compression
     await sharp(imagePath)
